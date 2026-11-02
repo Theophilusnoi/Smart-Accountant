@@ -1,0 +1,381 @@
+//@version=5
+// =============================================================================
+//  ACE Model - Strategy
+//  Backtestable version of the ACE Model indicator. Same swing detection and
+//  setup rules; trades are placed with strategy.entry / strategy.exit so the
+//  Strategy Tester reports net profit, win rate, profit factor and drawdown.
+//
+//  Fill model: process_orders_on_close = true, so the entry fills at the close
+//  of the confirmation (engulfing) candle - the same price the trade plan
+//  shows. TP is a limit order, SL a stop order, both active from the next bar.
+//
+//  Capital, order size, pyramiding, commission, slippage, margin and bar
+//  magnifier are set in the Properties tab (defaults below). Set commission
+//  and slippage to realistic values for your broker before judging results.
+// =============================================================================
+strategy("ACE Model Strategy", overlay = true,
+     initial_capital = 1000000, default_qty_type = strategy.fixed, default_qty_value = 1,
+     pyramiding = 0, process_orders_on_close = true, calc_on_every_tick = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0, slippage = 0,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// -----------------------------------------------------------------------------
+// GROUP NAMES
+// -----------------------------------------------------------------------------
+string G_DETECT = "1. SWING DETECTION"
+string G_SWING  = "SETUP 2 SWING"
+string G_TRADE  = "TRADE VISUALS"
+string G_RULES  = "7. TRADING RULES"
+string G_ALERTS = "8. ALERTS"
+string G_STRAT  = "9. STRATEGY"
+
+// -----------------------------------------------------------------------------
+// 1. SWING DETECTION
+// -----------------------------------------------------------------------------
+i_pivotLeft  = input.int(5, "Pivot left bars",  minval = 1, group = G_DETECT)
+i_pivotRight = input.int(5, "Pivot right bars", minval = 1, group = G_DETECT)
+
+// -----------------------------------------------------------------------------
+// SETUP 2 SWING (visuals)
+// -----------------------------------------------------------------------------
+i_swingLineColor = input.color(color.orange, "Swing line color", group = G_SWING)
+i_swingTextColor = input.color(color.orange, "Swing label text color", group = G_SWING)
+i_swingLabelBg   = input.color(color.new(color.white, 100), "Swing label background", group = G_SWING)
+i_swingLineWidth = input.int(2, "Swing line width", minval = 1, maxval = 10, group = G_SWING)
+i_swingLineStyle = input.string("Dashed", "Swing line style", options = ["Solid", "Dashed", "Dotted"], group = G_SWING)
+i_swingLabelSize = input.string("Small", "Swing label size", options = ["Tiny", "Small", "Normal", "Large"], group = G_SWING)
+i_swingLblOffset = input.int(12, "Swing label offset (ticks)", minval = 0, group = G_SWING)
+i_showSwingLbl   = input.bool(true, "Show swing labels", group = G_SWING)
+i_showSwingPrice = input.bool(false, "Show price in swing labels", group = G_SWING)
+i_maxSwings      = input.int(6, "Swings kept on chart (each side)", minval = 1, maxval = 200, group = G_SWING,
+     tooltip = "Older swing lines/labels are deleted to keep the chart readable. Increase to see more history.")
+
+// -----------------------------------------------------------------------------
+// TRADE VISUALS
+// -----------------------------------------------------------------------------
+i_tpColor     = input.color(color.new(color.green, 80), "TP box color", group = G_TRADE)
+i_slColor     = input.color(color.new(color.red, 80), "SL box color", group = G_TRADE)
+i_entryColor  = input.color(color.blue, "Entry line color", group = G_TRADE)
+i_boxTextCol  = input.color(color.white, "Box text color", group = G_TRADE)
+i_projBars    = input.int(20, "Minimum box length (bars)", minval = 1, maxval = 400, group = G_TRADE)
+i_maxPlans    = input.int(5, "Trade plans kept on chart", minval = 1, maxval = 100, group = G_TRADE)
+
+// -----------------------------------------------------------------------------
+// 7. TRADING RULES
+// -----------------------------------------------------------------------------
+i_s2Neutral   = input.bool(false, "S2 origin includes neutral candlesticks", group = G_RULES,
+     tooltip = "When enabled, a neutral (doji) candle may act as the opposite-colour candle that the engulfing candle swallows.")
+i_vaCheck     = input.bool(true, "VA boundary must remain inside 0.588-0.360", group = G_RULES,
+     tooltip = "Entry must sit between the 0.360 and 0.588 retracement of the last impulse leg (0 = leg end, 1 = leg origin).")
+i_targetMode  = input.string("Fib 0", "All setups target mode", options = ["Fib 0", "Fib -0.27", "Fib -0.5", "Fib -1", "Fib -1.618"], group = G_RULES)
+i_maxInvalid  = input.int(2, "Max invalidated S2 attempts per day", minval = 0, group = G_RULES)
+
+// -----------------------------------------------------------------------------
+// 8. ALERTS  (use "alert() function calls only" or "Order fills" when creating the alert)
+// -----------------------------------------------------------------------------
+i_alertSwing = input.bool(true, "Setup and swing events", group = G_ALERTS)
+i_alertPlan  = input.bool(true, "New valid trade plan", group = G_ALERTS)
+
+// -----------------------------------------------------------------------------
+// 9. STRATEGY
+// -----------------------------------------------------------------------------
+i_direction  = input.string("Long and short", "Trade direction", options = ["Long and short", "Long only", "Short only"], group = G_STRAT)
+i_useDates   = input.bool(false, "Limit backtest to date range", group = G_STRAT)
+i_startDate  = input.time(timestamp("2026-01-01T00:00:00"), "Start", group = G_STRAT)
+i_endDate    = input.time(timestamp("2099-12-31T00:00:00"), "End", group = G_STRAT)
+i_showStats  = input.bool(true, "Show stats table", group = G_STRAT)
+i_statsPos   = input.string("Top right", "Stats table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = G_STRAT)
+
+// -----------------------------------------------------------------------------
+// HELPERS
+// -----------------------------------------------------------------------------
+f_lineStyle(string s) =>
+    s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : line.style_dashed
+
+f_labelSize(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : s == "Large" ? size.large : size.small
+
+f_fmt(float v) =>
+    str.tostring(v, format.mintick)
+
+lineStyle  = f_lineStyle(i_swingLineStyle)
+labelSize  = f_labelSize(i_swingLabelSize)
+lblOffset  = i_swingLblOffset * syminfo.mintick
+targetFib  = str.tonumber(str.replace_all(i_targetMode, "Fib ", ""))
+
+// -----------------------------------------------------------------------------
+// SWING DETECTION
+// -----------------------------------------------------------------------------
+ph = ta.pivothigh(high, i_pivotLeft, i_pivotRight)
+pl = ta.pivotlow(low, i_pivotLeft, i_pivotRight)
+
+newSH = not na(ph)
+newSL = not na(pl)
+
+var float lastSH    = na
+var int   lastSHbar = na
+var float lastSL    = na
+var int   lastSLbar = na
+var line  shLine    = na
+var line  slLine    = na
+var shDrawLines  = array.new_line()
+var shDrawLabels = array.new_label()
+var slDrawLines  = array.new_line()
+var slDrawLabels = array.new_label()
+
+// keep only the newest `maxCount` drawings in each array
+f_trimLines(line[] arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        line.delete(array.shift(arr))
+
+f_trimLabels(label[] arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        label.delete(array.shift(arr))
+
+f_swingText(string tag, float price) =>
+    i_showSwingPrice ? tag + " " + f_fmt(price) : tag
+
+if newSH
+    pivotBar = bar_index - i_pivotRight
+    // terminate the previous swing-high line at the new swing
+    if not na(shLine)
+        line.set_x2(shLine, pivotBar)
+    lastSH    := ph
+    lastSHbar := pivotBar
+    shLine    := line.new(pivotBar, ph, bar_index, ph, color = i_swingLineColor, width = i_swingLineWidth, style = lineStyle)
+    array.push(shDrawLines, shLine)
+    f_trimLines(shDrawLines, i_maxSwings)
+    if i_showSwingLbl
+        array.push(shDrawLabels, label.new(pivotBar, ph + lblOffset, f_swingText("SH", ph), style = label.style_label_down,
+             color = i_swingLabelBg, textcolor = i_swingTextColor, size = labelSize))
+        f_trimLabels(shDrawLabels, i_maxSwings)
+
+if newSL
+    pivotBar = bar_index - i_pivotRight
+    if not na(slLine)
+        line.set_x2(slLine, pivotBar)
+    lastSL    := pl
+    lastSLbar := pivotBar
+    slLine    := line.new(pivotBar, pl, bar_index, pl, color = i_swingLineColor, width = i_swingLineWidth, style = lineStyle)
+    array.push(slDrawLines, slLine)
+    f_trimLines(slDrawLines, i_maxSwings)
+    if i_showSwingLbl
+        array.push(slDrawLabels, label.new(pivotBar, pl - lblOffset, f_swingText("SL", pl), style = label.style_label_up,
+             color = i_swingLabelBg, textcolor = i_swingTextColor, size = labelSize))
+        f_trimLabels(slDrawLabels, i_maxSwings)
+
+// keep the most recent swing lines extended to the current bar
+if not na(shLine) and not newSH
+    line.set_x2(shLine, bar_index)
+if not na(slLine) and not newSL
+    line.set_x2(slLine, bar_index)
+
+// -----------------------------------------------------------------------------
+// DAILY COUNTERS
+// -----------------------------------------------------------------------------
+newDay = ta.change(time("D")) != 0
+
+var int invalidToday = 0
+var int setupsToday  = 0
+
+if newDay
+    invalidToday := 0
+    setupsToday  := 0
+
+// -----------------------------------------------------------------------------
+// CANDLE PATTERNS (S2 origin)
+// -----------------------------------------------------------------------------
+bodySize    = math.abs(close - open)
+isNeutral   = bodySize <= (high - low) * 0.1
+prevNeutral = isNeutral[1]
+prevBear    = close[1] < open[1] or (i_s2Neutral and prevNeutral)
+prevBull    = close[1] > open[1] or (i_s2Neutral and prevNeutral)
+
+bullEngulf = close > open and prevBear and close >= math.max(open[1], close[1]) and open <= math.min(open[1], close[1])
+bearEngulf = close < open and prevBull and close <= math.min(open[1], close[1]) and open >= math.max(open[1], close[1])
+
+// -----------------------------------------------------------------------------
+// SETUP LOGIC
+// Long : last leg is UP (swing low -> swing high), price retraces into the VA,
+//        bullish engulfing confirms. SL = leg origin (Fib 1), TP = target Fib.
+// Short: mirror image.
+// -----------------------------------------------------------------------------
+haveSwings = not na(lastSH) and not na(lastSL)
+legRange   = haveSwings ? lastSH - lastSL : na
+legUp      = haveSwings and lastSHbar > lastSLbar
+legDown    = haveSwings and lastSLbar > lastSHbar
+
+// retracement position: 0 = leg end, 1 = leg origin
+fibPosLong  = legUp   and legRange > 0 ? (lastSH - close) / legRange : na
+fibPosShort = legDown and legRange > 0 ? (close - lastSL) / legRange : na
+
+inVA(float pos) =>
+    not na(pos) and (not i_vaCheck or (pos >= 0.360 and pos <= 0.588)) and pos > 0 and pos < 1
+
+var bool  planActive = false
+var int   tradeDir   = 0        // 1 long, -1 short
+var int   usedLegBar = na       // prevents more than one plan per leg
+var float tEntry     = na
+var float tTP        = na
+var float tSL        = na
+var int   tBar       = na
+var int   ctAtEntry  = 0        // closed-trade count when the plan was opened
+var box   tpBox      = na
+var box   slBox      = na
+var line  entryLine  = na
+var label entryLbl   = na
+var planBoxes  = array.new_box()
+var planLines  = array.new_line()
+var planLabels = array.new_label()
+
+f_trimBoxes(box[] arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        box.delete(array.shift(arr))
+
+inDateRange = not i_useDates or (time >= i_startDate and time <= i_endDate)
+allowLong   = i_direction != "Short only"
+allowShort  = i_direction != "Long only"
+
+canTrade = not planActive and strategy.position_size == 0 and barstate.isconfirmed and inDateRange and invalidToday < i_maxInvalid
+
+legId     = legUp ? lastSHbar : legDown ? lastSLbar : na
+freshLeg  = na(usedLegBar) or usedLegBar != legId
+
+longSetup  = allowLong  and canTrade and freshLeg and legUp   and bullEngulf and inVA(fibPosLong)
+shortSetup = allowShort and canTrade and freshLeg and legDown and bearEngulf and inVA(fibPosShort)
+newPlan    = longSetup or shortSetup
+
+if newPlan
+    setupsToday += 1
+    usedLegBar  := legId
+    planActive  := true
+    tradeDir    := longSetup ? 1 : -1
+    tEntry      := close
+    tBar        := bar_index
+    ctAtEntry   := strategy.closedtrades
+    tSL         := longSetup ? lastSL : lastSH
+    tTP         := longSetup ? lastSH - targetFib * legRange : lastSL + targetFib * legRange
+    pos          = longSetup ? fibPosLong : fibPosShort
+    tag          = "S" + str.tostring(setupsToday)
+    right        = bar_index + i_projBars
+
+    // ---- orders ----
+    if longSetup
+        strategy.entry("Long", strategy.long, comment = tag + " L",
+             alert_message = "ACE Model LONG " + syminfo.ticker + " entry " + f_fmt(tEntry) + " TP " + f_fmt(tTP) + " SL " + f_fmt(tSL))
+        strategy.exit("Long exit", from_entry = "Long", limit = tTP, stop = tSL, comment_profit = "TP", comment_loss = "SL")
+    else
+        strategy.entry("Short", strategy.short, comment = tag + " S",
+             alert_message = "ACE Model SHORT " + syminfo.ticker + " entry " + f_fmt(tEntry) + " TP " + f_fmt(tTP) + " SL " + f_fmt(tSL))
+        strategy.exit("Short exit", from_entry = "Short", limit = tTP, stop = tSL, comment_profit = "TP", comment_loss = "SL")
+
+    // ---- visuals ----
+    tpBox := box.new(bar_index, math.max(tEntry, tTP), right, math.min(tEntry, tTP),
+         border_color = color.new(color.green, 40), bgcolor = i_tpColor,
+         text = tag + " TP" + str.tostring(targetFib) + "  " + f_fmt(tTP), text_color = i_boxTextCol,
+         text_size = size.small, text_halign = text.align_left, text_valign = longSetup ? text.align_top : text.align_bottom)
+    slBox := box.new(bar_index, math.max(tEntry, tSL), right, math.min(tEntry, tSL),
+         border_color = color.new(color.red, 40), bgcolor = i_slColor,
+         text = "SL  " + f_fmt(tSL), text_color = i_boxTextCol,
+         text_size = size.small, text_halign = text.align_left, text_valign = longSetup ? text.align_bottom : text.align_top)
+    entryLine := line.new(bar_index, tEntry, right, tEntry, color = i_entryColor, width = 2)
+    entryLbl  := label.new(right, tEntry, tag + " " + str.tostring(pos, "0.000") + "  " + f_fmt(tEntry),
+         style = label.style_label_left, color = color.new(i_entryColor, 0), textcolor = color.white, size = size.small)
+    array.push(planBoxes, tpBox)
+    array.push(planBoxes, slBox)
+    array.push(planLines, entryLine)
+    array.push(planLabels, entryLbl)
+    f_trimBoxes(planBoxes, i_maxPlans * 2)
+    f_trimLines(planLines, i_maxPlans)
+    f_trimLabels(planLabels, i_maxPlans)
+
+// -----------------------------------------------------------------------------
+// TRADE MANAGEMENT - results come from the broker emulator, not re-computed
+// -----------------------------------------------------------------------------
+var float sumR    = 0.0
+var int   countR  = 0
+
+closedNow = false
+wonNow    = false
+
+if planActive and bar_index > tBar
+    right = math.max(bar_index, tBar + i_projBars)
+    box.set_right(tpBox, right)
+    box.set_right(slBox, right)
+    line.set_x2(entryLine, right)
+    label.set_x(entryLbl, right)
+
+    if strategy.position_size == 0 and strategy.closedtrades <= ctAtEntry
+        // entry never filled (e.g. rejected) - drop the plan
+        label.set_text(entryLbl, label.get_text(entryLbl) + "  (no fill)")
+        planActive := false
+    else if strategy.position_size == 0
+        lastIdx   = strategy.closedtrades - 1
+        exitPx    = strategy.closedtrades.exit_price(lastIdx)
+        entryPx   = strategy.closedtrades.entry_price(lastIdx)
+        risk      = math.abs(tEntry - tSL)
+        rMult     = risk > 0 ? (exitPx - entryPx) * tradeDir / risk : 0.0
+        wonNow   := strategy.closedtrades.profit(lastIdx) > 0
+        closedNow := true
+        sumR     += rMult
+        countR   += 1
+
+        box.set_right(tpBox, bar_index)
+        box.set_right(slBox, bar_index)
+        line.set_x2(entryLine, bar_index)
+        label.set_x(entryLbl, bar_index)
+        label.set_text(entryLbl, label.get_text(entryLbl) + (wonNow ? "  ✔ TP " : "  ✖ SL ") + str.tostring(rMult, "+0.00;-0.00") + "R")
+        if not wonNow
+            invalidToday += 1
+        planActive := false
+
+// -----------------------------------------------------------------------------
+// PLOTS
+// -----------------------------------------------------------------------------
+plotshape(longSetup,  "Long setup",  shape.triangleup,   location.belowbar, color.green, size = size.tiny)
+plotshape(shortSetup, "Short setup", shape.triangledown, location.abovebar, color.red,   size = size.tiny)
+
+// -----------------------------------------------------------------------------
+// STATS TABLE
+// -----------------------------------------------------------------------------
+f_tablePos(string s) =>
+    s == "Bottom right" ? position.bottom_right : s == "Top left" ? position.top_left : s == "Bottom left" ? position.bottom_left : position.top_right
+
+var table stats = table.new(f_tablePos(i_statsPos), 2, 9, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 60))
+
+f_row(int r, string k, string v, color c) =>
+    table.cell(stats, 0, r, k, text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+
+if i_showStats and barstate.islast
+    trades  = strategy.closedtrades
+    wins    = strategy.wintrades
+    losses  = strategy.losstrades
+    winRate = trades > 0 ? wins * 100.0 / trades : 0.0
+    pf      = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    avgR    = countR > 0 ? sumR / countR : 0.0
+    net     = strategy.netprofit
+    up      = color.new(color.lime, 0)
+    dn      = color.new(color.red, 0)
+    f_row(0, "ACE Model", "", color.white)
+    f_row(1, "Trades", str.tostring(trades), color.white)
+    f_row(2, "Wins / Losses", str.tostring(wins) + " / " + str.tostring(losses), color.white)
+    f_row(3, "Win rate", str.tostring(winRate, "0.0") + "%", winRate >= 50 ? up : dn)
+    f_row(4, "Profit factor", na(pf) ? "-" : str.tostring(pf, "0.00"), na(pf) or pf >= 1 ? up : dn)
+    f_row(5, "Avg R / trade", str.tostring(avgR, "+0.00;-0.00"), avgR >= 0 ? up : dn)
+    f_row(6, "Total R", str.tostring(sumR, "+0.0;-0.0"), sumR >= 0 ? up : dn)
+    f_row(7, "Net profit", str.tostring(net, "#,##0.00") + " " + syminfo.currency, net >= 0 ? up : dn)
+    f_row(8, "Max drawdown", str.tostring(strategy.max_drawdown, "#,##0.00"), color.white)
+
+// -----------------------------------------------------------------------------
+// ALERTS (strategies support alert() calls and order-fill alerts)
+// -----------------------------------------------------------------------------
+if i_alertSwing and newSH
+    alert("ACE Model: new swing high " + f_fmt(ph) + " on " + syminfo.ticker, alert.freq_once_per_bar_close)
+if i_alertSwing and newSL
+    alert("ACE Model: new swing low " + f_fmt(pl) + " on " + syminfo.ticker, alert.freq_once_per_bar_close)
+if i_alertSwing and closedNow
+    alert("ACE Model: trade closed at " + (wonNow ? "TP" : "SL") + " on " + syminfo.ticker, alert.freq_once_per_bar_close)
+if i_alertPlan and newPlan
+    alert("ACE Model: new " + (longSetup ? "LONG" : "SHORT") + " plan on " + syminfo.ticker +
+         " | Entry " + f_fmt(tEntry) + " | TP " + f_fmt(tTP) + " | SL " + f_fmt(tSL), alert.freq_once_per_bar_close)
