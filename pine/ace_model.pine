@@ -1,0 +1,285 @@
+//@version=5
+// =============================================================================
+//  ACE Model
+//  Swing-based setup indicator: detects swing highs / lows, waits for a
+//  pullback into the value area (VA) of the last impulse leg, confirms with an
+//  engulfing candle (the "S2 origin") and projects a trade plan with
+//  Entry / TP / SL boxes.
+//
+//  NOTE ON THE "PROPERTIES" GROUPS
+//  TradingView's real Properties tab (initial capital, order size, pyramiding,
+//  slippage, leverage, bar magnifier ...) only exists for strategy() scripts
+//  and is set in the declaration statement, not through input.*(). The GENERAL,
+//  DETAILIZATION AND EXECUTION and BROKER EMULATOR groups below reproduce that
+//  UI as inputs for reference only; they do not change how this indicator
+//  calculates.
+// =============================================================================
+indicator("ACE Model", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// -----------------------------------------------------------------------------
+// GROUP NAMES
+// -----------------------------------------------------------------------------
+string G_DETECT = "1. SWING DETECTION"
+string G_SWING  = "SETUP 2 SWING"
+string G_TRADE  = "TRADE VISUALS"
+string G_RULES  = "7. TRADING RULES"
+string G_ALERTS = "8. ALERTS"
+string G_GEN    = "GENERAL"
+string G_EXEC   = "DETAILIZATION AND EXECUTION"
+string G_BROKER = "BROKER EMULATOR"
+
+// -----------------------------------------------------------------------------
+// 1. SWING DETECTION
+// -----------------------------------------------------------------------------
+i_pivotLeft  = input.int(5, "Pivot left bars",  minval = 1, group = G_DETECT)
+i_pivotRight = input.int(5, "Pivot right bars", minval = 1, group = G_DETECT)
+
+// -----------------------------------------------------------------------------
+// SETUP 2 SWING (visuals)
+// -----------------------------------------------------------------------------
+i_swingLineColor = input.color(color.orange, "Swing line color", group = G_SWING)
+i_swingTextColor = input.color(color.orange, "Swing label text color", group = G_SWING)
+i_swingLabelBg   = input.color(color.new(color.white, 100), "Swing label background", group = G_SWING)
+i_swingLineWidth = input.int(2, "Swing line width", minval = 1, maxval = 10, group = G_SWING)
+i_swingLineStyle = input.string("Dashed", "Swing line style", options = ["Solid", "Dashed", "Dotted"], group = G_SWING)
+i_swingLabelSize = input.string("Small", "Swing label size", options = ["Tiny", "Small", "Normal", "Large"], group = G_SWING)
+i_swingLblOffset = input.int(12, "Swing label offset (ticks)", minval = 0, group = G_SWING)
+
+// -----------------------------------------------------------------------------
+// TRADE VISUALS
+// -----------------------------------------------------------------------------
+i_tpColor     = input.color(color.new(color.green, 80), "TP box color", group = G_TRADE)
+i_slColor     = input.color(color.new(color.red, 80), "SL box color", group = G_TRADE)
+i_entryColor  = input.color(color.blue, "Entry line color", group = G_TRADE)
+i_boxTextCol  = input.color(color.white, "Box text color", group = G_TRADE)
+i_projBars    = input.int(20, "Minimum box length (bars)", minval = 1, maxval = 400, group = G_TRADE)
+
+// -----------------------------------------------------------------------------
+// 7. TRADING RULES
+// -----------------------------------------------------------------------------
+i_s2Neutral   = input.bool(false, "S2 origin includes neutral candlesticks", group = G_RULES,
+     tooltip = "When enabled, a neutral (doji) candle may act as the opposite-colour candle that the engulfing candle swallows.")
+i_vaCheck     = input.bool(true, "VA boundary must remain inside 0.588-0.360", group = G_RULES,
+     tooltip = "Entry must sit between the 0.360 and 0.588 retracement of the last impulse leg (0 = leg end, 1 = leg origin).")
+i_targetMode  = input.string("Fib 0", "All setups target mode", options = ["Fib 0", "Fib -0.27", "Fib -0.5", "Fib -1", "Fib -1.618"], group = G_RULES)
+i_maxInvalid  = input.int(2, "Max invalidated S2 attempts per day", minval = 0, group = G_RULES)
+
+// -----------------------------------------------------------------------------
+// 8. ALERTS
+// -----------------------------------------------------------------------------
+i_alertSwing = input.bool(true, "Setup and swing events", group = G_ALERTS)
+i_alertPlan  = input.bool(true, "New valid trade plan", group = G_ALERTS)
+
+// -----------------------------------------------------------------------------
+// PROPERTIES (reference only - see note in header)
+// -----------------------------------------------------------------------------
+i_capital    = input.int(1000000, "Initial capital", minval = 1, group = G_GEN)
+i_orderSize  = input.int(1, "Default order size", minval = 1, group = G_GEN)
+i_pyramiding = input.int(0, "Pyramiding", minval = 0, group = G_GEN)
+
+i_barDetail  = input.string("Default (4 ticks per bar)", "Bar detalization", group = G_EXEC)
+i_execution  = input.string("On bar close, On realtime", "Script execution",
+     options = ["On bar close", "On realtime", "On bar close, On realtime"], group = G_EXEC)
+
+i_longLev    = input.float(1.0, "Long leverage (x)", minval = 1.0, step = 1.0, group = G_BROKER)
+i_shortLev   = input.float(1.0, "Short leverage (x)", minval = 1.0, step = 1.0, group = G_BROKER)
+i_slippage   = input.int(0, "Slippage (ticks)", minval = 0, group = G_BROKER)
+i_limitExec  = input.string("Requested price", "Limit order execution", group = G_BROKER)
+
+// -----------------------------------------------------------------------------
+// HELPERS
+// -----------------------------------------------------------------------------
+f_lineStyle(string s) =>
+    s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : line.style_dashed
+
+f_labelSize(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : s == "Large" ? size.large : size.small
+
+f_fmt(float v) =>
+    str.tostring(v, format.mintick)
+
+lineStyle  = f_lineStyle(i_swingLineStyle)
+labelSize  = f_labelSize(i_swingLabelSize)
+lblOffset  = i_swingLblOffset * syminfo.mintick
+targetFib  = str.tonumber(str.replace_all(i_targetMode, "Fib ", ""))
+
+// -----------------------------------------------------------------------------
+// SWING DETECTION
+// -----------------------------------------------------------------------------
+ph = ta.pivothigh(high, i_pivotLeft, i_pivotRight)
+pl = ta.pivotlow(low, i_pivotLeft, i_pivotRight)
+
+newSH = not na(ph)
+newSL = not na(pl)
+
+var float lastSH    = na
+var int   lastSHbar = na
+var float lastSL    = na
+var int   lastSLbar = na
+var line  shLine    = na
+var line  slLine    = na
+
+if newSH
+    pivotBar = bar_index - i_pivotRight
+    // terminate the previous swing-high line at the new swing
+    if not na(shLine)
+        line.set_x2(shLine, pivotBar)
+    lastSH    := ph
+    lastSHbar := pivotBar
+    shLine    := line.new(pivotBar, ph, bar_index, ph, color = i_swingLineColor, width = i_swingLineWidth, style = lineStyle)
+    label.new(pivotBar, ph + lblOffset, "SH " + f_fmt(ph), style = label.style_label_down,
+         color = i_swingLabelBg, textcolor = i_swingTextColor, size = labelSize)
+
+if newSL
+    pivotBar = bar_index - i_pivotRight
+    if not na(slLine)
+        line.set_x2(slLine, pivotBar)
+    lastSL    := pl
+    lastSLbar := pivotBar
+    slLine    := line.new(pivotBar, pl, bar_index, pl, color = i_swingLineColor, width = i_swingLineWidth, style = lineStyle)
+    label.new(pivotBar, pl - lblOffset, "SL " + f_fmt(pl), style = label.style_label_up,
+         color = i_swingLabelBg, textcolor = i_swingTextColor, size = labelSize)
+
+// keep the most recent swing lines extended to the current bar
+if not na(shLine) and not newSH
+    line.set_x2(shLine, bar_index)
+if not na(slLine) and not newSL
+    line.set_x2(slLine, bar_index)
+
+// -----------------------------------------------------------------------------
+// DAILY COUNTERS
+// -----------------------------------------------------------------------------
+newDay = ta.change(time("D")) != 0
+
+var int invalidToday = 0
+var int setupsToday  = 0
+
+if newDay
+    invalidToday := 0
+    setupsToday  := 0
+
+// -----------------------------------------------------------------------------
+// CANDLE PATTERNS (S2 origin)
+// -----------------------------------------------------------------------------
+bodySize    = math.abs(close - open)
+isNeutral   = bodySize <= (high - low) * 0.1
+prevNeutral = isNeutral[1]
+prevBear    = close[1] < open[1] or (i_s2Neutral and prevNeutral)
+prevBull    = close[1] > open[1] or (i_s2Neutral and prevNeutral)
+
+bullEngulf = close > open and prevBear and close >= math.max(open[1], close[1]) and open <= math.min(open[1], close[1])
+bearEngulf = close < open and prevBull and close <= math.min(open[1], close[1]) and open >= math.max(open[1], close[1])
+
+// -----------------------------------------------------------------------------
+// SETUP LOGIC
+// Long : last leg is UP (swing low -> swing high), price retraces into the VA,
+//        bullish engulfing confirms. SL = leg origin (Fib 1), TP = target Fib.
+// Short: mirror image.
+// -----------------------------------------------------------------------------
+haveSwings = not na(lastSH) and not na(lastSL)
+legRange   = haveSwings ? lastSH - lastSL : na
+legUp      = haveSwings and lastSHbar > lastSLbar
+legDown    = haveSwings and lastSLbar > lastSHbar
+
+// retracement position: 0 = leg end, 1 = leg origin
+fibPosLong  = legUp   and legRange > 0 ? (lastSH - close) / legRange : na
+fibPosShort = legDown and legRange > 0 ? (close - lastSL) / legRange : na
+
+inVA(float pos) =>
+    not na(pos) and (not i_vaCheck or (pos >= 0.360 and pos <= 0.588)) and pos > 0 and pos < 1
+
+var int  tradeDir   = 0        // 1 long, -1 short, 0 flat
+var int  usedLegBar = na       // prevents more than one plan per leg
+var float tEntry    = na
+var float tTP       = na
+var float tSL       = na
+var int   tBar      = na
+var box   tpBox     = na
+var box   slBox     = na
+var line  entryLine = na
+var label entryLbl  = na
+
+canTrade = tradeDir == 0 and barstate.isconfirmed and invalidToday < i_maxInvalid
+
+legId     = legUp ? lastSHbar : legDown ? lastSLbar : na
+freshLeg  = na(usedLegBar) or usedLegBar != legId
+
+longSetup  = canTrade and freshLeg and legUp   and bullEngulf and inVA(fibPosLong)
+shortSetup = canTrade and freshLeg and legDown and bearEngulf and inVA(fibPosShort)
+newPlan    = longSetup or shortSetup
+
+if newPlan
+    setupsToday += 1
+    usedLegBar  := legId
+    tradeDir    := longSetup ? 1 : -1
+    tEntry      := close
+    tBar        := bar_index
+    tSL         := longSetup ? lastSL : lastSH
+    tTP         := longSetup ? lastSH - targetFib * legRange : lastSL + targetFib * legRange
+    pos          = longSetup ? fibPosLong : fibPosShort
+    tag          = "S" + str.tostring(setupsToday)
+    right        = bar_index + i_projBars
+
+    tpBox := box.new(bar_index, math.max(tEntry, tTP), right, math.min(tEntry, tTP),
+         border_color = color.new(color.green, 40), bgcolor = i_tpColor,
+         text = tag + " TP" + str.tostring(targetFib) + "  " + f_fmt(tTP), text_color = i_boxTextCol,
+         text_size = size.small, text_halign = text.align_left, text_valign = longSetup ? text.align_top : text.align_bottom)
+    slBox := box.new(bar_index, math.max(tEntry, tSL), right, math.min(tEntry, tSL),
+         border_color = color.new(color.red, 40), bgcolor = i_slColor,
+         text = "SL  " + f_fmt(tSL), text_color = i_boxTextCol,
+         text_size = size.small, text_halign = text.align_left, text_valign = longSetup ? text.align_bottom : text.align_top)
+    entryLine := line.new(bar_index, tEntry, right, tEntry, color = i_entryColor, width = 2)
+    entryLbl  := label.new(right, tEntry, tag + " " + str.tostring(pos, "0.000") + "  " + f_fmt(tEntry),
+         style = label.style_label_left, color = color.new(i_entryColor, 0), textcolor = color.white, size = size.small)
+
+// -----------------------------------------------------------------------------
+// TRADE MANAGEMENT (TP / SL tracking)
+// -----------------------------------------------------------------------------
+hitTP = false
+hitSL = false
+
+if tradeDir != 0 and bar_index > tBar
+    // conservative: if both are touched on the same bar, assume SL first
+    hitSL := tradeDir == 1 ? low <= tSL : high >= tSL
+    hitTP := not hitSL and (tradeDir == 1 ? high >= tTP : low <= tTP)
+
+    right = math.max(bar_index, tBar + i_projBars)
+    box.set_right(tpBox, right)
+    box.set_right(slBox, right)
+    line.set_x2(entryLine, right)
+    label.set_x(entryLbl, right)
+
+    if hitSL or hitTP
+        box.set_right(tpBox, bar_index)
+        box.set_right(slBox, bar_index)
+        line.set_x2(entryLine, bar_index)
+        label.set_x(entryLbl, bar_index)
+        label.set_text(entryLbl, label.get_text(entryLbl) + (hitTP ? "  ✔ TP" : "  ✖ SL"))
+        if hitSL
+            invalidToday += 1
+        tradeDir := 0
+
+// -----------------------------------------------------------------------------
+// PLOTS
+// -----------------------------------------------------------------------------
+plotshape(longSetup,  "Long setup",  shape.triangleup,   location.belowbar, color.green, size = size.tiny)
+plotshape(shortSetup, "Short setup", shape.triangledown, location.abovebar, color.red,   size = size.tiny)
+
+// -----------------------------------------------------------------------------
+// ALERTS
+// -----------------------------------------------------------------------------
+swingEvent = newSH or newSL or hitTP or hitSL
+
+alertcondition(i_alertSwing and swingEvent, "Setup and swing events", "ACE Model: swing or setup event on {{ticker}} ({{interval}})")
+alertcondition(i_alertPlan and newPlan, "New valid trade plan", "ACE Model: new valid trade plan on {{ticker}} at {{close}}")
+
+// dynamic alerts for "Any alert() function call"
+if i_alertSwing and newSH
+    alert("ACE Model: new swing high " + f_fmt(ph) + " on " + syminfo.ticker, alert.freq_once_per_bar_close)
+if i_alertSwing and newSL
+    alert("ACE Model: new swing low " + f_fmt(pl) + " on " + syminfo.ticker, alert.freq_once_per_bar_close)
+if i_alertSwing and (hitTP or hitSL)
+    alert("ACE Model: trade closed at " + (hitTP ? "TP" : "SL") + " on " + syminfo.ticker, alert.freq_once_per_bar_close)
+if i_alertPlan and newPlan
+    alert("ACE Model: new " + (longSetup ? "LONG" : "SHORT") + " plan on " + syminfo.ticker +
+         " | Entry " + f_fmt(tEntry) + " | TP " + f_fmt(tTP) + " | SL " + f_fmt(tSL), alert.freq_once_per_bar_close)
