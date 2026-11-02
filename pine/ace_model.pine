@@ -44,6 +44,10 @@ i_swingLineWidth = input.int(2, "Swing line width", minval = 1, maxval = 10, gro
 i_swingLineStyle = input.string("Dashed", "Swing line style", options = ["Solid", "Dashed", "Dotted"], group = G_SWING)
 i_swingLabelSize = input.string("Small", "Swing label size", options = ["Tiny", "Small", "Normal", "Large"], group = G_SWING)
 i_swingLblOffset = input.int(12, "Swing label offset (ticks)", minval = 0, group = G_SWING)
+i_showSwingLbl   = input.bool(true, "Show swing labels", group = G_SWING)
+i_showSwingPrice = input.bool(false, "Show price in swing labels", group = G_SWING)
+i_maxSwings      = input.int(6, "Swings kept on chart (each side)", minval = 1, maxval = 200, group = G_SWING,
+     tooltip = "Older swing lines/labels are deleted to keep the chart readable. Increase to see more history.")
 
 // -----------------------------------------------------------------------------
 // TRADE VISUALS
@@ -53,6 +57,7 @@ i_slColor     = input.color(color.new(color.red, 80), "SL box color", group = G_
 i_entryColor  = input.color(color.blue, "Entry line color", group = G_TRADE)
 i_boxTextCol  = input.color(color.white, "Box text color", group = G_TRADE)
 i_projBars    = input.int(20, "Minimum box length (bars)", minval = 1, maxval = 400, group = G_TRADE)
+i_maxPlans    = input.int(5, "Trade plans kept on chart", minval = 1, maxval = 100, group = G_TRADE)
 
 // -----------------------------------------------------------------------------
 // 7. TRADING RULES
@@ -118,6 +123,22 @@ var float lastSL    = na
 var int   lastSLbar = na
 var line  shLine    = na
 var line  slLine    = na
+var shDrawLines  = array.new_line()
+var shDrawLabels = array.new_label()
+var slDrawLines  = array.new_line()
+var slDrawLabels = array.new_label()
+
+// keep only the newest `maxCount` drawings in each array
+f_trimLines(line[] arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        line.delete(array.shift(arr))
+
+f_trimLabels(label[] arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        label.delete(array.shift(arr))
+
+f_swingText(string tag, float price) =>
+    i_showSwingPrice ? tag + " " + f_fmt(price) : tag
 
 if newSH
     pivotBar = bar_index - i_pivotRight
@@ -127,8 +148,12 @@ if newSH
     lastSH    := ph
     lastSHbar := pivotBar
     shLine    := line.new(pivotBar, ph, bar_index, ph, color = i_swingLineColor, width = i_swingLineWidth, style = lineStyle)
-    label.new(pivotBar, ph + lblOffset, "SH " + f_fmt(ph), style = label.style_label_down,
-         color = i_swingLabelBg, textcolor = i_swingTextColor, size = labelSize)
+    array.push(shDrawLines, shLine)
+    f_trimLines(shDrawLines, i_maxSwings)
+    if i_showSwingLbl
+        array.push(shDrawLabels, label.new(pivotBar, ph + lblOffset, f_swingText("SH", ph), style = label.style_label_down,
+             color = i_swingLabelBg, textcolor = i_swingTextColor, size = labelSize))
+        f_trimLabels(shDrawLabels, i_maxSwings)
 
 if newSL
     pivotBar = bar_index - i_pivotRight
@@ -137,8 +162,12 @@ if newSL
     lastSL    := pl
     lastSLbar := pivotBar
     slLine    := line.new(pivotBar, pl, bar_index, pl, color = i_swingLineColor, width = i_swingLineWidth, style = lineStyle)
-    label.new(pivotBar, pl - lblOffset, "SL " + f_fmt(pl), style = label.style_label_up,
-         color = i_swingLabelBg, textcolor = i_swingTextColor, size = labelSize)
+    array.push(slDrawLines, slLine)
+    f_trimLines(slDrawLines, i_maxSwings)
+    if i_showSwingLbl
+        array.push(slDrawLabels, label.new(pivotBar, pl - lblOffset, f_swingText("SL", pl), style = label.style_label_up,
+             color = i_swingLabelBg, textcolor = i_swingTextColor, size = labelSize))
+        f_trimLabels(slDrawLabels, i_maxSwings)
 
 // keep the most recent swing lines extended to the current bar
 if not na(shLine) and not newSH
@@ -198,6 +227,13 @@ var box   tpBox     = na
 var box   slBox     = na
 var line  entryLine = na
 var label entryLbl  = na
+var planBoxes  = array.new_box()
+var planLines  = array.new_line()
+var planLabels = array.new_label()
+
+f_trimBoxes(box[] arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        box.delete(array.shift(arr))
 
 canTrade = tradeDir == 0 and barstate.isconfirmed and invalidToday < i_maxInvalid
 
@@ -231,6 +267,13 @@ if newPlan
     entryLine := line.new(bar_index, tEntry, right, tEntry, color = i_entryColor, width = 2)
     entryLbl  := label.new(right, tEntry, tag + " " + str.tostring(pos, "0.000") + "  " + f_fmt(tEntry),
          style = label.style_label_left, color = color.new(i_entryColor, 0), textcolor = color.white, size = size.small)
+    array.push(planBoxes, tpBox)
+    array.push(planBoxes, slBox)
+    array.push(planLines, entryLine)
+    array.push(planLabels, entryLbl)
+    f_trimBoxes(planBoxes, i_maxPlans * 2)
+    f_trimLines(planLines, i_maxPlans)
+    f_trimLabels(planLabels, i_maxPlans)
 
 // -----------------------------------------------------------------------------
 // TRADE MANAGEMENT (TP / SL tracking)
