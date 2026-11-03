@@ -1,0 +1,342 @@
+//@version=5
+// =============================================================================
+//  EMA 9/21 + VWAP + ADX Breakout Strategy
+//
+//  A plain EMA 9 / EMA 21 crossover gives many false signals. This strategy
+//  filters the cross with VWAP (trade with the session's fair value) and ADX
+//  (only trade when there is trend strength), then waits for a breakout.
+//
+//  BUY rules
+//    1. Crossover : EMA 9 (blue) crosses ABOVE EMA 21 (red).
+//    2. Price     : the confirmation candle closes above EMA 9 AND above VWAP.
+//    3. ADX       : ADX is above 20 (input) on the confirmation candle.
+//    4. Entry     : the next candle breaks the HIGH of the confirmation candle
+//                   (buy-stop order at that high + buffer).
+//  SELL rules are the mirror image (cross below, close below EMA 9 & VWAP,
+//  ADX > 20, next candle breaks the LOW of the confirmation candle).
+//
+//  Stop loss    : low (long) / high (short) of the confirmation candle.
+//  Take profit  : fixed reward-to-risk multiple (default 2R).
+//
+//  Note: ADX is calculated here but a strategy on the price chart cannot draw
+//  a second pane. Add TradingView's built-in "ADX" or "DMI" indicator
+//  (length 14, smoothing 14) to see the ADX line; its current value is also
+//  shown in the table.
+// =============================================================================
+strategy("EMA VWAP ADX Breakout", overlay = true,
+     initial_capital = 100000, default_qty_type = strategy.fixed, default_qty_value = 1,
+     pyramiding = 0, process_orders_on_close = false, calc_on_every_tick = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0, slippage = 0,
+     max_labels_count = 500)
+
+// -----------------------------------------------------------------------------
+// INPUTS
+// -----------------------------------------------------------------------------
+string G_IND   = "1. INDICATORS"
+string G_RULES = "2. ENTRY RULES"
+string G_EXIT  = "3. EXITS"
+string G_TIME  = "4. SESSION"
+string G_VIS   = "5. VISUALS"
+
+i_fastLen   = input.int(9, "Fast EMA (blue)", minval = 1, group = G_IND)
+i_slowLen   = input.int(21, "Slow EMA (red)", minval = 2, group = G_IND)
+i_vwapSrc   = input.source(hlc3, "VWAP source", group = G_IND)
+i_adxLen    = input.int(14, "ADX DI length", minval = 1, group = G_IND)
+i_adxSmooth = input.int(14, "ADX smoothing", minval = 1, group = G_IND)
+
+i_direction = input.string("Long and short", "Trade direction", options = ["Long and short", "Long only", "Short only"], group = G_RULES)
+i_adxMin    = input.float(20, "ADX must be above", minval = 0, step = 1, group = G_RULES)
+i_adxRising = input.bool(false, "ADX must be rising", group = G_RULES)
+i_diFilter  = input.bool(false, "Require +DI > -DI (long) / -DI > +DI (short)", group = G_RULES)
+i_crossWin  = input.int(3, "Confirmation within N bars of the cross", minval = 1, maxval = 20, group = G_RULES,
+     tooltip = "1 = the crossover candle itself must be the confirmation candle. Higher values let price/ADX confirm a few bars after the cross.")
+i_validBars = input.int(1, "Breakout must happen within N bars", minval = 1, maxval = 10, group = G_RULES,
+     tooltip = "1 = only the very next candle may break the confirmation high/low (the original rule). The pending order is cancelled afterwards.")
+i_bufTicks  = input.int(1, "Breakout buffer (ticks)", minval = 0, group = G_RULES)
+
+i_rr        = input.float(2.0, "Take profit (R multiple)", minval = 0.1, step = 0.1, group = G_EXIT)
+i_slMode    = input.string("Confirmation candle", "Stop loss at", options = ["Confirmation candle", "EMA 21", "Fixed ticks"], group = G_EXIT)
+i_slTicks   = input.int(40, "Fixed stop (ticks)", minval = 1, group = G_EXIT)
+i_slBuf     = input.int(1, "Stop buffer (ticks)", minval = 0, group = G_EXIT)
+i_exitCross = input.bool(true, "Exit on opposite EMA cross", group = G_EXIT)
+
+i_useSess   = input.bool(false, "Only take entries inside session", group = G_TIME)
+i_session   = input.session("0930-1600", "Session", group = G_TIME)
+i_tz        = input.string("America/New_York", "Session time zone", group = G_TIME)
+i_flatEnd   = input.bool(false, "Close open trades at session end", group = G_TIME)
+
+i_showMarks = input.bool(true, "Show confirmation candles & entry levels", group = G_VIS)
+i_showTable = input.bool(true, "Show stats table", group = G_VIS)
+i_tablePos  = input.string("Bottom right", "Table position", options = ["Top right", "Middle right", "Bottom right", "Top left", "Bottom left"], group = G_VIS)
+i_tableSize = input.string("Tiny", "Table text size", options = ["Tiny", "Small", "Normal"], group = G_VIS)
+
+// -----------------------------------------------------------------------------
+// INDICATORS
+// -----------------------------------------------------------------------------
+emaFast = ta.ema(close, i_fastLen)
+emaSlow = ta.ema(close, i_slowLen)
+vwap    = ta.vwap(i_vwapSrc)
+[diPlus, diMinus, adx] = ta.dmi(i_adxLen, i_adxSmooth)
+
+crossUp   = ta.crossover(emaFast, emaSlow)
+crossDown = ta.crossunder(emaFast, emaSlow)
+
+barsSinceUp   = ta.barssince(crossUp)
+barsSinceDown = ta.barssince(crossDown)
+
+tick     = syminfo.mintick
+inSess   = not na(time(timeframe.period, i_session, i_tz))
+sessOk   = not i_useSess or inSess
+sessEnd  = i_useSess and inSess[1] and not inSess
+
+allowLong  = i_direction != "Short only"
+allowShort = i_direction != "Long only"
+
+adxOk = adx > i_adxMin and (not i_adxRising or adx > adx[1])
+
+// -----------------------------------------------------------------------------
+// CONFIRMATION CANDLES
+// -----------------------------------------------------------------------------
+var int usedUpCross   = na   // bar of the cross already traded (one setup per cross)
+var int usedDownCross = na
+
+upCrossBar   = bar_index - barsSinceUp
+downCrossBar = bar_index - barsSinceDown
+
+longConf = allowLong and sessOk and strategy.position_size == 0 and
+     not na(barsSinceUp) and barsSinceUp < i_crossWin and emaFast > emaSlow and
+     close > emaFast and close > vwap and adxOk and
+     (not i_diFilter or diPlus > diMinus) and
+     (na(usedUpCross) or usedUpCross != upCrossBar)
+
+shortConf = allowShort and sessOk and strategy.position_size == 0 and
+     not na(barsSinceDown) and barsSinceDown < i_crossWin and emaFast < emaSlow and
+     close < emaFast and close < vwap and adxOk and
+     (not i_diFilter or diMinus > diPlus) and
+     (na(usedDownCross) or usedDownCross != downCrossBar)
+
+// -----------------------------------------------------------------------------
+// PERFORMANCE TRACKING (R multiples per direction)
+// -----------------------------------------------------------------------------
+var float tradeRisk  = na     // entry -> stop distance of the current plan / trade
+var int   seenClosed = 0
+var float sumR       = 0.0
+var stN  = array.new_float(2, 0.0)   // index 0 long, 1 short
+var stW  = array.new_float(2, 0.0)
+var stR  = array.new_float(2, 0.0)
+var stGW = array.new_float(2, 0.0)
+var stGL = array.new_float(2, 0.0)
+
+if strategy.closedtrades > seenClosed
+    for i = seenClosed to strategy.closedtrades - 1
+        sz  = strategy.closedtrades.size(i)
+        d   = sz > 0 ? 0 : 1
+        pts = (strategy.closedtrades.exit_price(i) - strategy.closedtrades.entry_price(i)) * (sz > 0 ? 1 : -1)
+        r   = nz(tradeRisk) > 0 ? pts / tradeRisk : 0.0
+        pnl = strategy.closedtrades.profit(i)
+        sumR += r
+        array.set(stN, d, array.get(stN, d) + 1)
+        array.set(stW, d, array.get(stW, d) + (pnl > 0 ? 1 : 0))
+        array.set(stR, d, array.get(stR, d) + r)
+        if pnl > 0
+            array.set(stGW, d, array.get(stGW, d) + pnl)
+        else
+            array.set(stGL, d, array.get(stGL, d) - pnl)
+    seenClosed := strategy.closedtrades
+
+// -----------------------------------------------------------------------------
+// PENDING BREAKOUT ORDERS
+// -----------------------------------------------------------------------------
+var int   pendDir   = 0       // 1 long, -1 short, 0 none
+var int   pendBar   = na
+var float pendEntry = na
+var float pendSL    = na
+var float pendTP    = na
+var int   tradesAtPlan = 0    // closed + open trades when the order was placed
+placedLong  = false
+placedShort = false
+
+f_stop(int dir, float entry) =>
+    float sl = switch i_slMode
+        "EMA 21"      => dir == 1 ? emaSlow - i_slBuf * tick : emaSlow + i_slBuf * tick
+        "Fixed ticks" => dir == 1 ? entry - i_slTicks * tick : entry + i_slTicks * tick
+        => dir == 1 ? low - i_slBuf * tick : high + i_slBuf * tick
+    // the stop must be on the correct side of the entry
+    dir == 1 ? math.min(sl, entry - tick) : math.max(sl, entry + tick)
+
+// cancel an untriggered order after its window
+if pendDir != 0 and strategy.closedtrades + strategy.opentrades == tradesAtPlan and bar_index - pendBar >= i_validBars
+    strategy.cancel(pendDir == 1 ? "Long" : "Short")
+    pendDir := 0
+
+if longConf and pendDir == 0
+    usedUpCross := upCrossBar
+    pendDir     := 1
+    pendBar     := bar_index
+    pendEntry   := high + i_bufTicks * tick
+    pendSL      := f_stop(1, pendEntry)
+    pendTP      := pendEntry + i_rr * (pendEntry - pendSL)
+    tradeRisk   := pendEntry - pendSL
+    tradesAtPlan := strategy.closedtrades + strategy.opentrades
+    placedLong  := true
+    strategy.entry("Long", strategy.long, stop = pendEntry, comment = "Buy break",
+         alert_message = "EMA/VWAP/ADX LONG " + syminfo.ticker + " entry " + str.tostring(pendEntry, format.mintick))
+    strategy.exit("Long exit", from_entry = "Long", stop = pendSL, limit = pendTP, comment_loss = "SL", comment_profit = "TP")
+
+if shortConf and pendDir == 0
+    usedDownCross := downCrossBar
+    pendDir       := -1
+    pendBar       := bar_index
+    pendEntry     := low - i_bufTicks * tick
+    pendSL        := f_stop(-1, pendEntry)
+    pendTP        := pendEntry - i_rr * (pendSL - pendEntry)
+    tradeRisk     := pendSL - pendEntry
+    tradesAtPlan  := strategy.closedtrades + strategy.opentrades
+    placedShort   := true
+    strategy.entry("Short", strategy.short, stop = pendEntry, comment = "Sell break",
+         alert_message = "EMA/VWAP/ADX SHORT " + syminfo.ticker + " entry " + str.tostring(pendEntry, format.mintick))
+    strategy.exit("Short exit", from_entry = "Short", stop = pendSL, limit = pendTP, comment_loss = "SL", comment_profit = "TP")
+
+// order filled (even if it also hit SL/TP on the same bar) -> no longer pending
+if pendDir != 0 and not placedLong and not placedShort and strategy.closedtrades + strategy.opentrades > tradesAtPlan
+    pendDir := 0
+
+// -----------------------------------------------------------------------------
+// OTHER EXITS
+// -----------------------------------------------------------------------------
+if i_exitCross and strategy.position_size > 0 and crossDown
+    strategy.close("Long", comment = "EMA cross")
+if i_exitCross and strategy.position_size < 0 and crossUp
+    strategy.close("Short", comment = "EMA cross")
+if i_flatEnd and sessEnd
+    strategy.close_all(comment = "Session end")
+    if pendDir != 0
+        strategy.cancel_all()
+        pendDir := 0
+
+// -----------------------------------------------------------------------------
+// PLOTS
+// -----------------------------------------------------------------------------
+plot(emaFast, "EMA 9",  color.new(color.blue, 0), 2)
+plot(emaSlow, "EMA 21", color.new(color.red, 0), 2)
+plot(vwap,    "VWAP",   color.new(color.orange, 0), 2)
+plot(adx,     "ADX",    display = display.data_window)
+
+plotshape(i_showMarks and placedLong, "Bull confirmation",
+     shape.diamond, location.belowbar, color.new(color.teal, 0), size = size.tiny)
+plotshape(i_showMarks and placedShort, "Bear confirmation",
+     shape.diamond, location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+
+// pending breakout level, and live SL / TP
+inTrade = strategy.position_size != 0
+plot(i_showMarks and pendDir != 0 ? pendEntry : na, "Pending entry", color.new(color.blue, 0), 1, plot.style_linebr)
+plot(i_showMarks and inTrade ? strategy.position_avg_price : na, "Entry", color.new(color.blue, 0), 1, plot.style_linebr)
+plot(i_showMarks and inTrade ? pendSL : na, "Stop loss",   color.new(color.red, 0),   1, plot.style_linebr)
+plot(i_showMarks and inTrade ? pendTP : na, "Take profit", color.new(color.green, 0), 1, plot.style_linebr)
+
+// -----------------------------------------------------------------------------
+// STATS TABLE
+// -----------------------------------------------------------------------------
+f_pos(string s) =>
+    switch s
+        "Top right"   => position.top_right
+        "Middle right" => position.middle_right
+        "Top left"    => position.top_left
+        "Bottom left" => position.bottom_left
+        => position.bottom_right
+
+tSize = i_tableSize == "Small" ? size.small : i_tableSize == "Normal" ? size.normal : size.tiny
+
+var table tbl = table.new(f_pos(i_tablePos), 4, 10, bgcolor = color.new(color.black, 20),
+     border_width = 1, border_color = color.new(color.gray, 70))
+
+f_cell(int c, int r, string txt, color tc = color.white, color bg = na) =>
+    table.cell(tbl, c, r, txt, text_color = tc, text_size = tSize, bgcolor = bg,
+         text_halign = c == 0 ? text.align_left : text.align_right)
+
+f_col(float v) =>
+    v >= 0 ? color.new(color.lime, 0) : color.new(#ff5252, 0)
+
+f_pct(float w, float n) =>
+    n > 0 ? str.tostring(w * 100.0 / n, "0.0") + "%" : "-"
+
+f_pf(float gw, float gl) =>
+    gl > 0 ? str.tostring(gw / gl, "0.00") : gw > 0 ? "∞" : "-"
+
+if i_showTable and barstate.islast
+    hdr = color.new(color.gray, 30)
+    lN = array.get(stN, 0)
+    sN = array.get(stN, 1)
+    lW = array.get(stW, 0)
+    sW = array.get(stW, 1)
+    lR = array.get(stR, 0)
+    sR = array.get(stR, 1)
+    lNet = array.get(stGW, 0) - array.get(stGL, 0)
+    sNet = array.get(stGW, 1) - array.get(stGL, 1)
+    allN = lN + sN
+
+    f_cell(0, 0, "EMA·VWAP·ADX", color.white, hdr)
+    f_cell(1, 0, "All", color.white, hdr)
+    f_cell(2, 0, "Long", color.white, hdr)
+    f_cell(3, 0, "Short", color.white, hdr)
+
+    f_cell(0, 1, "Trades")
+    f_cell(1, 1, str.tostring(allN, "0"))
+    f_cell(2, 1, str.tostring(lN, "0"))
+    f_cell(3, 1, str.tostring(sN, "0"))
+
+    f_cell(0, 2, "Win rate")
+    f_cell(1, 2, f_pct(lW + sW, allN))
+    f_cell(2, 2, f_pct(lW, lN))
+    f_cell(3, 2, f_pct(sW, sN))
+
+    f_cell(0, 3, "Profit factor")
+    f_cell(1, 3, f_pf(strategy.grossprofit, strategy.grossloss))
+    f_cell(2, 3, f_pf(array.get(stGW, 0), array.get(stGL, 0)))
+    f_cell(3, 3, f_pf(array.get(stGW, 1), array.get(stGL, 1)))
+
+    avgR = allN > 0 ? sumR / allN : 0.0
+    lAvg = lN > 0 ? lR / lN : 0.0
+    sAvg = sN > 0 ? sR / sN : 0.0
+    f_cell(0, 4, "Avg R / trade")
+    f_cell(1, 4, str.tostring(avgR, "+0.00;-0.00"), f_col(avgR))
+    f_cell(2, 4, str.tostring(lAvg, "+0.00;-0.00"), f_col(lAvg))
+    f_cell(3, 4, str.tostring(sAvg, "+0.00;-0.00"), f_col(sAvg))
+
+    f_cell(0, 5, "Total R")
+    f_cell(1, 5, str.tostring(sumR, "+0.0;-0.0"), f_col(sumR))
+    f_cell(2, 5, str.tostring(lR, "+0.0;-0.0"), f_col(lR))
+    f_cell(3, 5, str.tostring(sR, "+0.0;-0.0"), f_col(sR))
+
+    f_cell(0, 6, "Net profit")
+    f_cell(1, 6, str.tostring(strategy.netprofit, "#,##0"), f_col(strategy.netprofit))
+    f_cell(2, 6, str.tostring(lNet, "#,##0"), f_col(lNet))
+    f_cell(3, 6, str.tostring(sNet, "#,##0"), f_col(sNet))
+
+    f_cell(0, 7, "Max drawdown")
+    f_cell(1, 7, str.tostring(strategy.max_drawdown, "#,##0"), color.new(#ff5252, 0))
+    f_cell(2, 7, "")
+    f_cell(3, 7, "")
+
+    f_cell(0, 8, "ADX now")
+    f_cell(1, 8, str.tostring(adx, "0.0"), adx > i_adxMin ? color.new(color.lime, 0) : color.gray)
+    f_cell(2, 8, "+DI " + str.tostring(diPlus, "0.0"))
+    f_cell(3, 8, "-DI " + str.tostring(diMinus, "0.0"))
+
+    state = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" :
+         pendDir == 1 ? "Buy stop " + str.tostring(pendEntry, format.mintick) :
+         pendDir == -1 ? "Sell stop " + str.tostring(pendEntry, format.mintick) : "Flat"
+    f_cell(0, 9, "Status", color.white, hdr)
+    f_cell(1, 9, state, color.white, hdr)
+    f_cell(2, 9, inTrade ? "SL " + str.tostring(pendSL, format.mintick) : "", color.white, hdr)
+    f_cell(3, 9, inTrade ? "TP " + str.tostring(pendTP, format.mintick) : "", color.white, hdr)
+
+// -----------------------------------------------------------------------------
+// ALERTS  (create the alert with "alert() function calls only", or use "Order fills")
+// -----------------------------------------------------------------------------
+if placedLong
+    alert("EMA/VWAP/ADX: bullish confirmation on " + syminfo.ticker + " - buy stop " + str.tostring(pendEntry, format.mintick) +
+         " | SL " + str.tostring(pendSL, format.mintick) + " | TP " + str.tostring(pendTP, format.mintick), alert.freq_once_per_bar_close)
+if placedShort
+    alert("EMA/VWAP/ADX: bearish confirmation on " + syminfo.ticker + " - sell stop " + str.tostring(pendEntry, format.mintick) +
+         " | SL " + str.tostring(pendSL, format.mintick) + " | TP " + str.tostring(pendTP, format.mintick), alert.freq_once_per_bar_close)
