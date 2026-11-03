@@ -84,7 +84,9 @@ i_useDates   = input.bool(false, "Limit backtest to date range", group = G_STRAT
 i_startDate  = input.time(timestamp("2026-01-01T00:00:00"), "Start", group = G_STRAT)
 i_endDate    = input.time(timestamp("2099-12-31T00:00:00"), "End", group = G_STRAT)
 i_showStats  = input.bool(true, "Show stats table", group = G_STRAT)
-i_statsPos   = input.string("Top right", "Stats table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = G_STRAT)
+i_statsPos   = input.string("Top right", "Stats table position", options = ["Top right", "Bottom right", "Top left", "Bottom left", "Middle right", "Bottom center"], group = G_STRAT)
+i_statsSize  = input.string("Tiny", "Stats table text size", options = ["Tiny", "Small", "Normal", "Large"], group = G_STRAT)
+i_recentN    = input.int(5, "Recent trades shown in table", minval = 0, maxval = 20, group = G_STRAT)
 
 // -----------------------------------------------------------------------------
 // HELPERS
@@ -295,6 +297,30 @@ if newPlan
 var float sumR    = 0.0
 var int   countR  = 0
 
+// per-direction stats, index 0 = long, 1 = short
+var dTrades = array.new_float(2, 0.0)
+var dWins   = array.new_float(2, 0.0)
+var dR      = array.new_float(2, 0.0)
+var dGrossW = array.new_float(2, 0.0)
+var dGrossL = array.new_float(2, 0.0)
+
+// today's stats
+var int   tdTrades = 0
+var int   tdWins   = 0
+var float tdR      = 0.0
+var float tdNet    = 0.0
+if newDay
+    tdTrades := 0
+    tdWins   := 0
+    tdR      := 0.0
+    tdNet    := 0.0
+
+// recent trades log (newest first)
+var rcTime = array.new_string()
+var rcDir  = array.new_int()
+var rcR    = array.new_float()
+var rcWin  = array.new_bool()
+
 closedNow = false
 wonNow    = false
 
@@ -317,8 +343,33 @@ if planActive and bar_index > tBar
         rMult     = risk > 0 ? (exitPx - entryPx) * tradeDir / risk : 0.0
         wonNow   := strategy.closedtrades.profit(lastIdx) > 0
         closedNow := true
+        pnl       = strategy.closedtrades.profit(lastIdx)
         sumR     += rMult
         countR   += 1
+
+        d = tradeDir == 1 ? 0 : 1
+        array.set(dTrades, d, array.get(dTrades, d) + 1)
+        array.set(dWins,   d, array.get(dWins, d) + (wonNow ? 1 : 0))
+        array.set(dR,      d, array.get(dR, d) + rMult)
+        if pnl > 0
+            array.set(dGrossW, d, array.get(dGrossW, d) + pnl)
+        else
+            array.set(dGrossL, d, array.get(dGrossL, d) - pnl)
+
+        tdTrades += 1
+        tdWins   += wonNow ? 1 : 0
+        tdR      += rMult
+        tdNet    += pnl
+
+        array.unshift(rcTime, str.format_time(time, "MM-dd HH:mm", syminfo.timezone))
+        array.unshift(rcDir, tradeDir)
+        array.unshift(rcR, rMult)
+        array.unshift(rcWin, wonNow)
+        while array.size(rcTime) > 20
+            array.pop(rcTime)
+            array.pop(rcDir)
+            array.pop(rcR)
+            array.pop(rcWin)
 
         box.set_right(tpBox, bar_index)
         box.set_right(slBox, bar_index)
@@ -337,35 +388,117 @@ plotshape(shortSetup, "Short setup", shape.triangledown, location.abovebar, colo
 
 // -----------------------------------------------------------------------------
 // STATS TABLE
+//   Overall / long / short performance, today's results, the open trade and
+//   the most recent closed trades.
 // -----------------------------------------------------------------------------
 f_tablePos(string s) =>
-    s == "Bottom right" ? position.bottom_right : s == "Top left" ? position.top_left : s == "Bottom left" ? position.bottom_left : position.top_right
+    switch s
+        "Bottom right"  => position.bottom_right
+        "Top left"      => position.top_left
+        "Bottom left"   => position.bottom_left
+        "Middle right"  => position.middle_right
+        "Bottom center" => position.bottom_center
+        => position.top_right
 
-var table stats = table.new(f_tablePos(i_statsPos), 2, 9, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 60))
+tblSize  = f_labelSize(i_statsSize)
+cHead    = color.new(color.gray, 30)
+cText    = color.white
+cUp      = color.new(color.lime, 0)
+cDn      = color.new(#ff5252, 0)
 
-f_row(int r, string k, string v, color c) =>
-    table.cell(stats, 0, r, k, text_color = color.white, text_size = size.small, text_halign = text.align_left)
-    table.cell(stats, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+var table stats = table.new(f_tablePos(i_statsPos), 4, 32, bgcolor = color.new(color.black, 20),
+     border_width = 1, border_color = color.new(color.gray, 70), frame_width = 1, frame_color = color.new(color.gray, 40))
+
+f_cell(int c, int r, string txt, color tc, color bg = na) =>
+    table.cell(stats, c, r, txt, text_color = tc, text_size = tblSize, bgcolor = bg,
+         text_halign = c == 0 ? text.align_left : text.align_right)
+
+f_row4(int r, string a, string b, string c, string d, color ca, color cb, color cc, color cd, color bg = na) =>
+    f_cell(0, r, a, ca, bg)
+    f_cell(1, r, b, cb, bg)
+    f_cell(2, r, c, cc, bg)
+    f_cell(3, r, d, cd, bg)
+
+f_sign(float v) =>
+    v >= 0 ? color.new(color.lime, 0) : color.new(#ff5252, 0)
+
+f_pct(float w, float n) =>
+    n > 0 ? str.tostring(w * 100.0 / n, "0.0") + "%" : "-"
+
+f_pf(float gw, float gl) =>
+    gl > 0 ? str.tostring(gw / gl, "0.00") : gw > 0 ? "∞" : "-"
+
+f_rFmt(float v) =>
+    str.tostring(v, "+0.00;-0.00")
 
 if i_showStats and barstate.islast
-    trades  = strategy.closedtrades
-    wins    = strategy.wintrades
-    losses  = strategy.losstrades
-    winRate = trades > 0 ? wins * 100.0 / trades : 0.0
-    pf      = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
-    avgR    = countR > 0 ? sumR / countR : 0.0
-    net     = strategy.netprofit
-    up      = color.new(color.lime, 0)
-    dn      = color.new(color.red, 0)
-    f_row(0, "ACE Model", "", color.white)
-    f_row(1, "Trades", str.tostring(trades), color.white)
-    f_row(2, "Wins / Losses", str.tostring(wins) + " / " + str.tostring(losses), color.white)
-    f_row(3, "Win rate", str.tostring(winRate, "0.0") + "%", winRate >= 50 ? up : dn)
-    f_row(4, "Profit factor", na(pf) ? "-" : str.tostring(pf, "0.00"), na(pf) or pf >= 1 ? up : dn)
-    f_row(5, "Avg R / trade", str.tostring(avgR, "+0.00;-0.00"), avgR >= 0 ? up : dn)
-    f_row(6, "Total R", str.tostring(sumR, "+0.0;-0.0"), sumR >= 0 ? up : dn)
-    f_row(7, "Net profit", str.tostring(net, "#,##0.00") + " " + syminfo.currency, net >= 0 ? up : dn)
-    f_row(8, "Max drawdown", str.tostring(strategy.max_drawdown, "#,##0.00"), color.white)
+    table.clear(stats, 0, 0, 3, 31)
+    allN  = strategy.closedtrades
+    lN    = array.get(dTrades, 0)
+    sN    = array.get(dTrades, 1)
+    lW    = array.get(dWins, 0)
+    sW    = array.get(dWins, 1)
+    lR    = array.get(dR, 0)
+    sR    = array.get(dR, 1)
+    lNet  = array.get(dGrossW, 0) - array.get(dGrossL, 0)
+    sNet  = array.get(dGrossW, 1) - array.get(dGrossL, 1)
+    avgR  = countR > 0 ? sumR / countR : 0.0
+    lAvg  = lN > 0 ? lR / lN : 0.0
+    sAvg  = sN > 0 ? sR / sN : 0.0
+    net   = strategy.netprofit
+    r = 0
+
+    // ---- performance ----
+    f_row4(r, "ACE Model", "All", "Long", "Short", cText, cText, cText, cText, cHead)
+    r += 1
+    f_row4(r, "Trades", str.tostring(allN), str.tostring(lN, "0"), str.tostring(sN, "0"), cText, cText, cText, cText)
+    r += 1
+    f_row4(r, "Wins / Losses", str.tostring(strategy.wintrades) + " / " + str.tostring(strategy.losstrades),
+         str.tostring(lW, "0") + " / " + str.tostring(lN - lW, "0"), str.tostring(sW, "0") + " / " + str.tostring(sN - sW, "0"),
+         cText, cText, cText, cText)
+    r += 1
+    f_row4(r, "Win rate", f_pct(strategy.wintrades, allN), f_pct(lW, lN), f_pct(sW, sN), cText, cText, cText, cText)
+    r += 1
+    f_row4(r, "Profit factor", f_pf(strategy.grossprofit, strategy.grossloss),
+         f_pf(array.get(dGrossW, 0), array.get(dGrossL, 0)), f_pf(array.get(dGrossW, 1), array.get(dGrossL, 1)),
+         cText, cText, cText, cText)
+    r += 1
+    f_row4(r, "Avg R / trade", f_rFmt(avgR), f_rFmt(lAvg), f_rFmt(sAvg), cText, f_sign(avgR), f_sign(lAvg), f_sign(sAvg))
+    r += 1
+    f_row4(r, "Total R", f_rFmt(sumR), f_rFmt(lR), f_rFmt(sR), cText, f_sign(sumR), f_sign(lR), f_sign(sR))
+    r += 1
+    f_row4(r, "Net profit", str.tostring(net, "#,##0"), str.tostring(lNet, "#,##0"), str.tostring(sNet, "#,##0"),
+         cText, f_sign(net), f_sign(lNet), f_sign(sNet))
+    r += 1
+    f_row4(r, "Max drawdown", str.tostring(strategy.max_drawdown, "#,##0"), "", "", cText, cDn, cText, cText)
+    r += 1
+
+    // ---- today ----
+    f_row4(r, "Today", str.tostring(tdTrades) + " trades", str.tostring(tdWins) + " W / " + str.tostring(tdTrades - tdWins) + " L",
+         f_rFmt(tdR) + "R", cText, cText, cText, f_sign(tdR), cHead)
+    r += 1
+
+    // ---- open trade ----
+    if planActive and strategy.position_size != 0
+        openPnl = strategy.openprofit
+        f_row4(r, "Open " + (tradeDir == 1 ? "LONG" : "SHORT"), "E " + f_fmt(tEntry), "TP " + f_fmt(tTP) + " / SL " + f_fmt(tSL),
+             str.tostring(openPnl, "#,##0"), cText, cText, cText, f_sign(openPnl))
+    else
+        f_row4(r, "Open trade", "flat", "", "", cText, cText, cText, cText)
+    r += 1
+
+    // ---- recent trades ----
+    shown = math.min(i_recentN, array.size(rcTime))
+    if i_recentN > 0
+        f_row4(r, "Recent trades", "Dir", "R", "Result", cText, cText, cText, cText, cHead)
+        r += 1
+        if shown == 0
+            f_row4(r, "none yet", "", "", "", cText, cText, cText, cText)
+        else
+            for i = 0 to shown - 1
+                w = array.get(rcWin, i)
+                f_row4(r + i, array.get(rcTime, i), array.get(rcDir, i) == 1 ? "Long" : "Short",
+                     f_rFmt(array.get(rcR, i)), w ? "✔ TP" : "✖ SL", cText, cText, f_sign(array.get(rcR, i)), w ? cUp : cDn)
 
 // -----------------------------------------------------------------------------
 // ALERTS (strategies support alert() calls and order-fill alerts)
