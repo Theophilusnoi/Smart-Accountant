@@ -95,6 +95,106 @@ allowShort = i_direction != "Long only"
 adxOk = adx > i_adxMin and (not i_adxRising or adx > adx[1])
 
 // -----------------------------------------------------------------------------
+// ASIA SESSION VALUE FILTER (optional, off by default)
+//   Builds a volume profile of the Asia session (19:00-03:00 New York time)
+//   from the chart's bars and derives the Asia POC / VAH / VAL. Levels are only
+//   calculated after the Asia session closes, so they never repaint.
+//   Trend setups work best once price has been accepted away from overnight
+//   value, so the filter only allows trades in that direction:
+//     Acceptance    : longs above the Asia POC, shorts below it
+//     Outside value : longs above the Asia VAH, shorts below the Asia VAL
+// -----------------------------------------------------------------------------
+string G_ASIA = "6. ASIA VALUE FILTER"
+i_asiaFilter = input.string("Off", "Asia value filter", options = ["Off", "Acceptance (POC)", "Outside value (VAH / VAL)"], group = G_ASIA,
+     tooltip = "Off keeps the original strategy. Acceptance: longs only above the Asia POC, shorts only below it. Outside value: longs only above the Asia VAH, shorts only below the Asia VAL.")
+i_asiaSess   = input.session("1900-0300", "Asia session (New York time)", group = G_ASIA)
+i_asiaRows   = input.int(50, "Profile rows", minval = 10, maxval = 300, group = G_ASIA)
+i_asiaVaPct  = input.float(70, "Value area %", minval = 10, maxval = 100, step = 1, group = G_ASIA)
+i_asiaShow   = input.bool(false, "Plot Asia POC / VAH / VAL", group = G_ASIA)
+
+string ASIA_TZ = "America/New_York"
+
+f_asiaProfile(float[] hs, float[] ls, float[] vs, float top, float bot, int rows, float vaPct) =>
+    float poc = na
+    float vah = na
+    float val = na
+    int   n   = array.size(hs)
+    if n > 0 and top > bot
+        float step = (top - bot) / rows
+        bins = array.new_float(rows, 0.0)
+        for i = 0 to n - 1
+            int lo = math.max(0, math.min(rows - 1, math.floor((array.get(ls, i) - bot) / step)))
+            int hi = math.max(0, math.min(rows - 1, math.floor((array.get(hs, i) - bot) / step)))
+            float per = array.get(vs, i) / (hi - lo + 1)
+            for b = lo to hi
+                array.set(bins, b, array.get(bins, b) + per)
+        float total = array.sum(bins)
+        if total <= 0
+            poc := (top + bot) / 2
+            vah := top
+            val := bot
+        else
+            int pocIdx = array.indexof(bins, array.max(bins))
+            float acc = array.get(bins, pocIdx)
+            int up = pocIdx
+            int dn = pocIdx
+            while acc < total * vaPct / 100 and (up < rows - 1 or dn > 0)
+                float vUp = up < rows - 1 ? array.get(bins, up + 1) : -1.0
+                float vDn = dn > 0 ? array.get(bins, dn - 1) : -1.0
+                if vUp >= vDn
+                    up += 1
+                    acc += vUp
+                else
+                    dn -= 1
+                    acc += vDn
+            poc := bot + (pocIdx + 0.5) * step
+            vah := bot + (up + 1) * step
+            val := bot + dn * step
+    [poc, vah, val]
+
+asiaIn    = not na(time(timeframe.period, i_asiaSess, ASIA_TZ))
+asiaBegin = asiaIn and not asiaIn[1]
+asiaDone  = asiaIn[1] and not asiaIn
+
+var asiaHs = array.new_float()
+var asiaLs = array.new_float()
+var asiaVs = array.new_float()
+var float asiaTop = na
+var float asiaBot = na
+var float asiaPOC = na
+var float asiaVAH = na
+var float asiaVAL = na
+
+if asiaBegin
+    array.clear(asiaHs)
+    array.clear(asiaLs)
+    array.clear(asiaVs)
+    asiaTop := high
+    asiaBot := low
+
+if asiaIn
+    array.push(asiaHs, high)
+    array.push(asiaLs, low)
+    array.push(asiaVs, nz(volume))
+    asiaTop := math.max(nz(asiaTop, high), high)
+    asiaBot := math.min(nz(asiaBot, low), low)
+
+if asiaDone and array.size(asiaHs) > 0
+    [aPoc, aVah, aVal] = f_asiaProfile(asiaHs, asiaLs, asiaVs, asiaTop, asiaBot, i_asiaRows, i_asiaVaPct)
+    asiaPOC := aPoc
+    asiaVAH := aVah
+    asiaVAL := aVal
+
+asiaFilterOn = i_asiaFilter != "Off"
+asiaOutside  = i_asiaFilter == "Outside value (VAH / VAL)"
+asiaLongOk   = not asiaFilterOn or (not na(asiaPOC) and close > (asiaOutside ? asiaVAH : asiaPOC))
+asiaShortOk  = not asiaFilterOn or (not na(asiaPOC) and close < (asiaOutside ? asiaVAL : asiaPOC))
+
+plot(i_asiaShow ? asiaPOC : na, "Asia POC", color.new(color.red, 0), 1, plot.style_linebr)
+plot(i_asiaShow ? asiaVAH : na, "Asia VAH", color.new(color.blue, 0), 1, plot.style_linebr)
+plot(i_asiaShow ? asiaVAL : na, "Asia VAL", color.new(color.green, 0), 1, plot.style_linebr)
+
+// -----------------------------------------------------------------------------
 // CONFIRMATION CANDLES
 // -----------------------------------------------------------------------------
 var int usedUpCross   = na   // bar of the cross already traded (one setup per cross)
@@ -106,13 +206,13 @@ downCrossBar = bar_index - barsSinceDown
 longConf = allowLong and sessOk and strategy.position_size == 0 and
      not na(barsSinceUp) and barsSinceUp < i_crossWin and emaFast > emaSlow and
      close > emaFast and close > vwap and adxOk and
-     (not i_diFilter or diPlus > diMinus) and
+     (not i_diFilter or diPlus > diMinus) and asiaLongOk and
      (na(usedUpCross) or usedUpCross != upCrossBar)
 
 shortConf = allowShort and sessOk and strategy.position_size == 0 and
      not na(barsSinceDown) and barsSinceDown < i_crossWin and emaFast < emaSlow and
      close < emaFast and close < vwap and adxOk and
-     (not i_diFilter or diMinus > diPlus) and
+     (not i_diFilter or diMinus > diPlus) and asiaShortOk and
      (na(usedDownCross) or usedDownCross != downCrossBar)
 
 // -----------------------------------------------------------------------------

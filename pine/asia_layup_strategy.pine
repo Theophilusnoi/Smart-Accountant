@@ -1,0 +1,507 @@
+//@version=5
+// =============================================================================
+//  The Layup - Asia Session Value Area Mean-Reversion Strategy
+//
+//  Idea
+//    The Asia session (19:00-03:00 New York time) builds a "value area": the
+//    price zone where ~70% of its volume traded. During the New York session
+//    price often returns to that value. "The Layup" buys a rejection of the
+//    Asia Value Area Low (VAL) - ideally where VWAP sits too - and targets the
+//    Asia Point of Control (POC), then the Value Area High (VAH).
+//    The short side is the mirror image at the Asia VAH.
+//
+//  Volume profile
+//    TradingView's Volume Profile is a drawing tool, not a script variable, so
+//    the profile is calculated here from the chart's own bars: each Asia bar's
+//    volume is spread evenly across the price rows its high-low range covers.
+//    POC = row with the most volume; the value area grows from the POC towards
+//    the larger neighbouring row until it holds the chosen % of volume.
+//    Use a 1-5 minute chart for an accurate profile.
+//
+//  Non-repainting
+//    - Asia levels are only calculated after the Asia session has closed.
+//    - Signals are evaluated on confirmed (closed) bars only.
+//    - Entries are market orders filled at the NEXT bar's open.
+// =============================================================================
+strategy("Asia Layup (VAL/VAH Reversion)", overlay = true,
+     initial_capital = 100000, default_qty_type = strategy.fixed, default_qty_value = 2,
+     pyramiding = 0, process_orders_on_close = false, calc_on_every_tick = false,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0, slippage = 0,
+     max_bars_back = 5000)
+
+// -----------------------------------------------------------------------------
+// INPUTS
+// -----------------------------------------------------------------------------
+string TZ      = "America/New_York"
+string G_SESS  = "1. SESSIONS (New York time)"
+string G_PROF  = "2. VOLUME PROFILE"
+string G_ENTRY = "3. ENTRY - THE LAYUP"
+string G_RISK  = "4. RISK MANAGEMENT"
+string G_VIS   = "5. VISUALS"
+
+i_asiaSess   = input.session("1900-0300", "Asia session", group = G_SESS)
+i_nySess     = input.session("0930-1600", "New York session", group = G_SESS)
+i_tradeNY    = input.bool(true, "Enable NY session trading", group = G_SESS)
+i_lastEntry  = input.int(1530, "No new entries after (HHMM)", minval = 0, maxval = 2359, group = G_SESS)
+i_flatTime   = input.int(1555, "Close all trades at (HHMM)", minval = 0, maxval = 2359, group = G_SESS)
+
+i_levelMode  = input.string("Value Area", "Asia VAH / VAL from", options = ["Value Area", "Session High / Low"], group = G_PROF,
+     tooltip = "Value Area = true volume-profile VAH/VAL. Session High / Low = simpler proxy using the Asia range extremes. The POC always comes from the profile.")
+i_rows       = input.int(50, "Profile rows", minval = 10, maxval = 300, group = G_PROF)
+i_vaPct      = input.float(70, "Value area %", minval = 10, maxval = 100, step = 1, group = G_PROF)
+i_show7d     = input.bool(false, "Show 7-day value area (POC / VAH / VAL)", group = G_PROF)
+i_rows7d     = input.int(100, "7-day profile rows", minval = 10, maxval = 400, group = G_PROF)
+
+i_direction  = input.string("Long and short", "Trade direction", options = ["Long and short", "Long only", "Short only"], group = G_ENTRY)
+i_touchTicks = input.int(0, "Touch tolerance (ticks)", minval = 0, group = G_ENTRY,
+     tooltip = "0 = the wick must reach the level. A few ticks also counts near-misses as a touch.")
+i_approach   = input.bool(true, "Require approach from the value side", group = G_ENTRY,
+     tooltip = "Long: previous candle closed above the VAL (a pull-back into it). Short: previous candle closed below the VAH.")
+i_vwapReq    = input.bool(true, "Require VWAP confluence", group = G_ENTRY)
+i_vwapTicks  = input.int(10, "VWAP confluence distance (ticks)", minval = 0, group = G_ENTRY)
+i_vwapAnchor = input.string("Daily", "VWAP anchor", options = ["Daily", "NY open 09:30"], group = G_ENTRY)
+i_maxTrades  = input.int(2, "Max trades per NY session", minval = 1, group = G_ENTRY)
+i_minRR      = input.float(1.0, "Min reward:risk to POC", minval = 0, step = 0.1, group = G_ENTRY)
+
+i_slMode     = input.string("Rejection candle", "Stop loss at", options = ["Rejection candle", "Beyond Asia level"], group = G_RISK)
+i_slBuf      = input.int(2, "Stop loss buffer (ticks)", minval = 0, group = G_RISK)
+i_tp1Pct     = input.int(50, "% of position closed at TP1 (POC)", minval = 1, maxval = 100, group = G_RISK,
+     tooltip = "The rest targets TP2 (Asia VAH for longs / VAL for shorts). 100 = everything exits at the POC.")
+i_beAfterTP1 = input.bool(true, "Move stop to breakeven after TP1", group = G_RISK)
+
+i_extend     = input.bool(false, "Keep Asia levels visible after NY close", group = G_VIS)
+i_asiaBg     = input.bool(true, "Shade the Asia session", group = G_VIS)
+i_showTable  = input.bool(true, "Show stats table", group = G_VIS)
+i_tablePos   = input.string("Bottom right", "Table position", options = ["Top right", "Middle right", "Bottom right", "Top left", "Bottom left"], group = G_VIS)
+i_tableSize  = input.string("Tiny", "Table text size", options = ["Tiny", "Small", "Normal"], group = G_VIS)
+
+tick = syminfo.mintick
+
+// -----------------------------------------------------------------------------
+// VOLUME PROFILE FUNCTION
+//   hs / ls / vs : highs, lows and volumes of the bars in the profile
+//   top / bot    : price range of the profile
+//   returns [POC, VAH, VAL]
+// -----------------------------------------------------------------------------
+f_profile(float[] hs, float[] ls, float[] vs, float top, float bot, int rows, float vaPct) =>
+    float poc = na
+    float vah = na
+    float val = na
+    int   n   = array.size(hs)
+    if n > 0 and top > bot
+        float step = (top - bot) / rows
+        bins = array.new_float(rows, 0.0)
+        for i = 0 to n - 1
+            int lo = math.max(0, math.min(rows - 1, math.floor((array.get(ls, i) - bot) / step)))
+            int hi = math.max(0, math.min(rows - 1, math.floor((array.get(hs, i) - bot) / step)))
+            float per = array.get(vs, i) / (hi - lo + 1)
+            for b = lo to hi
+                array.set(bins, b, array.get(bins, b) + per)
+        float total = array.sum(bins)
+        if total <= 0
+            // no volume data on this symbol: fall back to the range
+            poc := (top + bot) / 2
+            vah := top
+            val := bot
+        else
+            int pocIdx = array.indexof(bins, array.max(bins))
+            float acc = array.get(bins, pocIdx)
+            int up = pocIdx
+            int dn = pocIdx
+            while acc < total * vaPct / 100 and (up < rows - 1 or dn > 0)
+                float vUp = up < rows - 1 ? array.get(bins, up + 1) : -1.0
+                float vDn = dn > 0 ? array.get(bins, dn - 1) : -1.0
+                if vUp >= vDn
+                    up += 1
+                    acc += vUp
+                else
+                    dn -= 1
+                    acc += vDn
+            poc := bot + (pocIdx + 0.5) * step
+            vah := bot + (up + 1) * step
+            val := bot + dn * step
+    [poc, vah, val]
+
+f_hhmm(int t) =>
+    hour(t, TZ) * 100 + minute(t, TZ)
+
+// -----------------------------------------------------------------------------
+// SESSIONS
+// -----------------------------------------------------------------------------
+inAsia    = not na(time(timeframe.period, i_asiaSess, TZ))
+inNY      = not na(time(timeframe.period, i_nySess, TZ))
+asiaBegin = inAsia and not inAsia[1]
+asiaDone  = inAsia[1] and not inAsia
+nyBegin   = inNY and not inNY[1]
+nyDone    = inNY[1] and not inNY
+
+closeHM     = f_hhmm(time_close)
+entryWindow = inNY and closeHM <= i_lastEntry
+flatNow     = inNY and closeHM >= i_flatTime
+
+// -----------------------------------------------------------------------------
+// ASIA SESSION PROFILE
+//   Bars are collected while the Asia session is open; the profile is
+//   calculated once, on the first bar after the session closes.
+// -----------------------------------------------------------------------------
+var asiaHs = array.new_float()
+var asiaLs = array.new_float()
+var asiaVs = array.new_float()
+var float asiaTop = na
+var float asiaBot = na
+var float asiaPOC = na
+var float asiaVAH = na
+var float asiaVAL = na
+var float asiaHi  = na
+var float asiaLo  = na
+var bool  levelsLive = false     // levels of the latest completed Asia session are usable
+var bool  levelsShow = false
+
+if asiaBegin
+    array.clear(asiaHs)
+    array.clear(asiaLs)
+    array.clear(asiaVs)
+    asiaTop    := high
+    asiaBot    := low
+    levelsLive := false
+    levelsShow := false
+
+if inAsia
+    array.push(asiaHs, high)
+    array.push(asiaLs, low)
+    array.push(asiaVs, nz(volume))
+    asiaTop := math.max(nz(asiaTop, high), high)
+    asiaBot := math.min(nz(asiaBot, low), low)
+
+if asiaDone and array.size(asiaHs) > 0
+    [p, vh, vl] = f_profile(asiaHs, asiaLs, asiaVs, asiaTop, asiaBot, i_rows, i_vaPct)
+    asiaPOC    := p
+    asiaVAH    := vh
+    asiaVAL    := vl
+    asiaHi     := asiaTop
+    asiaLo     := asiaBot
+    levelsLive := true
+    levelsShow := true
+
+if nyDone and not i_extend
+    levelsShow := false
+
+// levels used for trading
+tradeVAH = i_levelMode == "Value Area" ? asiaVAH : asiaHi
+tradeVAL = i_levelMode == "Value Area" ? asiaVAL : asiaLo
+
+// -----------------------------------------------------------------------------
+// 7-DAY VALUE AREA (optional)
+//   Keeps the last 7 days of bars and rebuilds the profile once per day.
+// -----------------------------------------------------------------------------
+var wHs = array.new_float()
+var wLs = array.new_float()
+var wVs = array.new_float()
+var wTs = array.new_int()
+var float poc7 = na
+var float vah7 = na
+var float val7 = na
+
+newDay = ta.change(time("D")) != 0
+
+if i_show7d
+    if newDay and array.size(wTs) > 0
+        cutoff = time - 7 * 86400000
+        int first = 0
+        while first < array.size(wTs) and array.get(wTs, first) < cutoff
+            first += 1
+        if first > 0
+            sz = array.size(wTs)
+            wHs := array.copy(array.slice(wHs, first, sz))
+            wLs := array.copy(array.slice(wLs, first, sz))
+            wVs := array.copy(array.slice(wVs, first, sz))
+            wTs := array.copy(array.slice(wTs, first, sz))
+        if array.size(wHs) > 0
+            [p7, vh7, vl7] = f_profile(wHs, wLs, wVs, array.max(wHs), array.min(wLs), i_rows7d, i_vaPct)
+            poc7 := p7
+            vah7 := vh7
+            val7 := vl7
+    if array.size(wTs) < 90000
+        array.push(wHs, high)
+        array.push(wLs, low)
+        array.push(wVs, nz(volume))
+        array.push(wTs, time)
+
+// -----------------------------------------------------------------------------
+// VWAP
+// -----------------------------------------------------------------------------
+vwapDaily = ta.vwap(hlc3)
+vwapNY    = ta.vwap(hlc3, nyBegin)
+vwapVal   = i_vwapAnchor == "Daily" ? vwapDaily : vwapNY
+
+// -----------------------------------------------------------------------------
+// ENTRY CONDITIONS - THE LAYUP
+// -----------------------------------------------------------------------------
+var int   tradesToday = 0
+var bool  pending   = false     // order sent, waiting for the next-bar fill
+var bool  active    = false     // position (or its result) being tracked
+var int   pDir      = 0
+var float pSL       = na
+var float pTP1      = na
+var float pTP2      = na
+var int   ctAtSig   = 0
+var float entryQty  = na
+var bool  beDone    = false
+
+if nyBegin
+    tradesToday := 0
+
+allowLong  = i_direction != "Short only"
+allowShort = i_direction != "Long only"
+
+canEnter = i_tradeNY and entryWindow and not flatNow and barstate.isconfirmed and
+     strategy.position_size == 0 and not pending and not active and
+     tradesToday < i_maxTrades and levelsLive and not na(asiaPOC)
+
+buf = i_slBuf * tick
+
+// LONG: wick touches / pierces the Asia VAL, candle closes back above it
+longRej  = low <= tradeVAL + i_touchTicks * tick and close > tradeVAL and (not i_approach or close[1] > tradeVAL)
+longVwap = math.abs(tradeVAL - vwapVal) <= i_vwapTicks * tick
+longSL   = math.min(i_slMode == "Rejection candle" ? low - buf : tradeVAL - buf, close - tick)
+longRisk = close - longSL
+longRew  = asiaPOC - close
+longSig  = allowLong and canEnter and longRej and (not i_vwapReq or longVwap) and
+     longRew > 0 and longRew >= i_minRR * longRisk
+
+// SHORT: wick touches / pierces the Asia VAH, candle closes back below it
+shortRej  = high >= tradeVAH - i_touchTicks * tick and close < tradeVAH and (not i_approach or close[1] < tradeVAH)
+shortVwap = math.abs(tradeVAH - vwapVal) <= i_vwapTicks * tick
+shortSL   = math.max(i_slMode == "Rejection candle" ? high + buf : tradeVAH + buf, close + tick)
+shortRisk = shortSL - close
+shortRew  = close - asiaPOC
+shortSig  = allowShort and canEnter and not longSig and shortRej and (not i_vwapReq or shortVwap) and
+     shortRew > 0 and shortRew >= i_minRR * shortRisk
+
+// -----------------------------------------------------------------------------
+// ORDERS
+//   TP1 = Asia POC (part of the position), TP2 = opposite edge of value.
+// -----------------------------------------------------------------------------
+placed = false
+
+if longSig
+    pDir := 1
+    pSL  := longSL
+    pTP1 := asiaPOC
+    pTP2 := math.max(tradeVAH, asiaPOC + tick)
+    strategy.entry("Layup L", strategy.long, comment = "Layup L",
+         alert_message = "Layup LONG " + syminfo.ticker + " SL " + str.tostring(pSL, format.mintick) + " TP1 " + str.tostring(pTP1, format.mintick))
+    strategy.exit("L TP1", "Layup L", qty_percent = i_tp1Pct, limit = pTP1, stop = pSL, comment_profit = "TP1 POC", comment_loss = "SL")
+    strategy.exit("L TP2", "Layup L", limit = pTP2, stop = pSL, comment_profit = "TP2 VAH", comment_loss = "SL")
+    placed := true
+
+if shortSig
+    pDir := -1
+    pSL  := shortSL
+    pTP1 := asiaPOC
+    pTP2 := math.min(tradeVAL, asiaPOC - tick)
+    strategy.entry("Layup S", strategy.short, comment = "Layup S",
+         alert_message = "Layup SHORT " + syminfo.ticker + " SL " + str.tostring(pSL, format.mintick) + " TP1 " + str.tostring(pTP1, format.mintick))
+    strategy.exit("S TP1", "Layup S", qty_percent = i_tp1Pct, limit = pTP1, stop = pSL, comment_profit = "TP1 POC", comment_loss = "SL")
+    strategy.exit("S TP2", "Layup S", limit = pTP2, stop = pSL, comment_profit = "TP2 VAL", comment_loss = "SL")
+    placed := true
+
+if placed
+    pending     := true
+    tradesToday += 1
+    ctAtSig     := strategy.closedtrades
+    entryQty    := na
+    beDone      := false
+
+// -----------------------------------------------------------------------------
+// TRADE MANAGEMENT
+// -----------------------------------------------------------------------------
+// market order fills at the next bar's open
+if pending and not placed
+    pending := false
+    active  := strategy.position_size != 0 or strategy.closedtrades > ctAtSig
+
+if active and strategy.position_size != 0 and na(entryQty)
+    entryQty := math.abs(strategy.position_size)
+
+// breakeven for the runner once TP1 has filled
+if active and i_beAfterTP1 and not beDone and i_tp1Pct < 100 and strategy.position_size != 0 and
+     math.abs(strategy.position_size) < nz(entryQty)
+    if pDir == 1
+        strategy.exit("L TP2", "Layup L", limit = pTP2, stop = strategy.position_avg_price, comment_profit = "TP2 VAH", comment_loss = "BE")
+    else
+        strategy.exit("S TP2", "Layup S", limit = pTP2, stop = strategy.position_avg_price, comment_profit = "TP2 VAL", comment_loss = "BE")
+    beDone := true
+
+// time-based exit: flat before the NY close
+if flatNow and strategy.position_size != 0
+    strategy.close_all(comment = "Time exit", immediately = true)
+
+// -----------------------------------------------------------------------------
+// PERFORMANCE TRACKING (one entry + its partial exits = one trade)
+// -----------------------------------------------------------------------------
+var float sumR = 0.0
+var stN  = array.new_float(2, 0.0)   // index 0 long, 1 short
+var stW  = array.new_float(2, 0.0)
+var stR  = array.new_float(2, 0.0)
+var stGW = array.new_float(2, 0.0)
+var stGL = array.new_float(2, 0.0)
+
+if active and strategy.position_size == 0 and strategy.closedtrades > ctAtSig
+    float pnl   = 0.0
+    float ptsQ  = 0.0
+    float qty   = 0.0
+    float entPx = strategy.closedtrades.entry_price(ctAtSig)
+    for i = ctAtSig to strategy.closedtrades - 1
+        q = math.abs(strategy.closedtrades.size(i))
+        pnl  += strategy.closedtrades.profit(i)
+        ptsQ += (strategy.closedtrades.exit_price(i) - strategy.closedtrades.entry_price(i)) * pDir * q
+        qty  += q
+    risk = math.abs(entPx - pSL)
+    r    = qty > 0 and risk > 0 ? (ptsQ / qty) / risk : 0.0
+    d    = pDir == 1 ? 0 : 1
+    sumR += r
+    array.set(stN, d, array.get(stN, d) + 1)
+    array.set(stW, d, array.get(stW, d) + (pnl > 0 ? 1 : 0))
+    array.set(stR, d, array.get(stR, d) + r)
+    if pnl > 0
+        array.set(stGW, d, array.get(stGW, d) + pnl)
+    else
+        array.set(stGL, d, array.get(stGL, d) - pnl)
+    active := false
+
+// -----------------------------------------------------------------------------
+// PLOTS
+// -----------------------------------------------------------------------------
+bgcolor(i_asiaBg and inAsia ? color.new(color.purple, 93) : na, title = "Asia session")
+
+plot(levelsShow ? asiaPOC : na, "Asia POC", color.new(color.red, 0), 2, plot.style_linebr)
+plot(levelsShow ? tradeVAH : na, "Asia VAH", color.new(color.blue, 0), 2, plot.style_linebr)
+plot(levelsShow ? tradeVAL : na, "Asia VAL", color.new(color.green, 0), 2, plot.style_linebr)
+plot(vwapVal, "VWAP", color.new(color.orange, 0), 1)
+
+plot(i_show7d ? poc7 : na, "7D POC", color.new(color.red, 50), 1, plot.style_circles)
+plot(i_show7d ? vah7 : na, "7D VAH", color.new(color.blue, 50), 1, plot.style_circles)
+plot(i_show7d ? val7 : na, "7D VAL", color.new(color.green, 50), 1, plot.style_circles)
+
+plotshape(placed and pDir == 1, "Layup long", shape.triangleup, location.belowbar, color.new(color.green, 0), size = size.small)
+plotshape(placed and pDir == -1, "Layup short", shape.triangledown, location.abovebar, color.new(color.red, 0), size = size.small)
+
+inTrade = strategy.position_size != 0
+plot(inTrade ? pSL : na, "Stop loss", color.new(color.red, 30), 1, plot.style_linebr)
+
+// -----------------------------------------------------------------------------
+// STATS TABLE
+// -----------------------------------------------------------------------------
+f_pos(string s) =>
+    switch s
+        "Top right"    => position.top_right
+        "Middle right" => position.middle_right
+        "Top left"     => position.top_left
+        "Bottom left"  => position.bottom_left
+        => position.bottom_right
+
+tSize = i_tableSize == "Small" ? size.small : i_tableSize == "Normal" ? size.normal : size.tiny
+
+var table tbl = table.new(f_pos(i_tablePos), 4, 11, bgcolor = color.new(color.black, 20),
+     border_width = 1, border_color = color.new(color.gray, 70))
+
+f_cell(int c, int r, string txt, color tc = color.white, color bg = na) =>
+    table.cell(tbl, c, r, txt, text_color = tc, text_size = tSize, bgcolor = bg,
+         text_halign = c == 0 ? text.align_left : text.align_right)
+
+f_col(float v) =>
+    v >= 0 ? color.new(color.lime, 0) : color.new(#ff5252, 0)
+
+f_pct(float w, float n) =>
+    n > 0 ? str.tostring(w * 100.0 / n, "0.0") + "%" : "-"
+
+f_pf(float gw, float gl) =>
+    gl > 0 ? str.tostring(gw / gl, "0.00") : gw > 0 ? "∞" : "-"
+
+f_px(float v) =>
+    na(v) ? "-" : str.tostring(v, format.mintick)
+
+if i_showTable and barstate.islast
+    hdr  = color.new(color.gray, 30)
+    lN   = array.get(stN, 0)
+    sN   = array.get(stN, 1)
+    lW   = array.get(stW, 0)
+    sW   = array.get(stW, 1)
+    lR   = array.get(stR, 0)
+    sR   = array.get(stR, 1)
+    lNet = array.get(stGW, 0) - array.get(stGL, 0)
+    sNet = array.get(stGW, 1) - array.get(stGL, 1)
+    allN = lN + sN
+    gw   = array.get(stGW, 0) + array.get(stGW, 1)
+    gl   = array.get(stGL, 0) + array.get(stGL, 1)
+    avgR = allN > 0 ? sumR / allN : 0.0
+    lAvg = lN > 0 ? lR / lN : 0.0
+    sAvg = sN > 0 ? sR / sN : 0.0
+
+    f_cell(0, 0, "Asia Layup", color.white, hdr)
+    f_cell(1, 0, "All", color.white, hdr)
+    f_cell(2, 0, "Long", color.white, hdr)
+    f_cell(3, 0, "Short", color.white, hdr)
+
+    f_cell(0, 1, "Trades")
+    f_cell(1, 1, str.tostring(allN, "0"))
+    f_cell(2, 1, str.tostring(lN, "0"))
+    f_cell(3, 1, str.tostring(sN, "0"))
+
+    f_cell(0, 2, "Win rate")
+    f_cell(1, 2, f_pct(lW + sW, allN))
+    f_cell(2, 2, f_pct(lW, lN))
+    f_cell(3, 2, f_pct(sW, sN))
+
+    f_cell(0, 3, "Profit factor")
+    f_cell(1, 3, f_pf(gw, gl))
+    f_cell(2, 3, f_pf(array.get(stGW, 0), array.get(stGL, 0)))
+    f_cell(3, 3, f_pf(array.get(stGW, 1), array.get(stGL, 1)))
+
+    f_cell(0, 4, "Avg R / trade")
+    f_cell(1, 4, str.tostring(avgR, "+0.00;-0.00"), f_col(avgR))
+    f_cell(2, 4, str.tostring(lAvg, "+0.00;-0.00"), f_col(lAvg))
+    f_cell(3, 4, str.tostring(sAvg, "+0.00;-0.00"), f_col(sAvg))
+
+    f_cell(0, 5, "Total R")
+    f_cell(1, 5, str.tostring(sumR, "+0.0;-0.0"), f_col(sumR))
+    f_cell(2, 5, str.tostring(lR, "+0.0;-0.0"), f_col(lR))
+    f_cell(3, 5, str.tostring(sR, "+0.0;-0.0"), f_col(sR))
+
+    f_cell(0, 6, "Net profit")
+    f_cell(1, 6, str.tostring(strategy.netprofit, "#,##0"), f_col(strategy.netprofit))
+    f_cell(2, 6, str.tostring(lNet, "#,##0"), f_col(lNet))
+    f_cell(3, 6, str.tostring(sNet, "#,##0"), f_col(sNet))
+
+    f_cell(0, 7, "Max drawdown")
+    f_cell(1, 7, str.tostring(strategy.max_drawdown, "#,##0"), color.new(#ff5252, 0))
+    f_cell(2, 7, "")
+    f_cell(3, 7, "")
+
+    f_cell(0, 8, "Asia levels", color.white, hdr)
+    f_cell(1, 8, "VAH " + f_px(tradeVAH), color.new(#64b5f6, 0), hdr)
+    f_cell(2, 8, "POC " + f_px(asiaPOC), color.new(#ff5252, 0), hdr)
+    f_cell(3, 8, "VAL " + f_px(tradeVAL), color.new(color.lime, 0), hdr)
+
+    f_cell(0, 9, "VWAP")
+    f_cell(1, 9, f_px(vwapVal), color.new(color.orange, 0))
+    f_cell(2, 9, "to VAL " + (na(tradeVAL) ? "-" : str.tostring(math.round((vwapVal - tradeVAL) / tick)) + "t"))
+    f_cell(3, 9, "to VAH " + (na(tradeVAH) ? "-" : str.tostring(math.round((tradeVAH - vwapVal) / tick)) + "t"))
+
+    state = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "Flat"
+    f_cell(0, 10, "Status", color.white, hdr)
+    f_cell(1, 10, state, color.white, hdr)
+    f_cell(2, 10, inTrade ? "SL " + f_px(pSL) : "Today " + str.tostring(tradesToday) + "/" + str.tostring(i_maxTrades), color.white, hdr)
+    f_cell(3, 10, inTrade ? "TP1 " + f_px(pTP1) : "", color.white, hdr)
+
+// -----------------------------------------------------------------------------
+// ALERTS  (create the alert with "alert() function calls only", or use "Order fills")
+// -----------------------------------------------------------------------------
+if placed
+    alert("Asia Layup " + (pDir == 1 ? "LONG" : "SHORT") + " on " + syminfo.ticker +
+         " | SL " + str.tostring(pSL, format.mintick) + " | TP1 POC " + str.tostring(pTP1, format.mintick) +
+         " | TP2 " + str.tostring(pTP2, format.mintick), alert.freq_once_per_bar_close)
+if asiaDone and levelsLive
+    alert("Asia levels ready on " + syminfo.ticker + ": VAH " + str.tostring(tradeVAH, format.mintick) +
+         " POC " + str.tostring(asiaPOC, format.mintick) + " VAL " + str.tostring(tradeVAL, format.mintick), alert.freq_once_per_bar_close)
