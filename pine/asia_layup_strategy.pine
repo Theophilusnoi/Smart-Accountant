@@ -58,10 +58,12 @@ i_touchTicks = input.int(0, "Touch tolerance (ticks)", minval = 0, group = G_ENT
 i_approach   = input.bool(true, "Require approach from the value side", group = G_ENTRY,
      tooltip = "Long: previous candle closed above the VAL (a pull-back into it). Short: previous candle closed below the VAH.")
 i_vwapReq    = input.bool(true, "Require VWAP confluence", group = G_ENTRY)
-i_vwapTicks  = input.int(10, "VWAP confluence distance (ticks)", minval = 0, group = G_ENTRY)
+i_vwapTicks  = input.int(40, "VWAP confluence distance (ticks)", minval = 0, group = G_ENTRY,
+     tooltip = "Max distance between VWAP and the Asia level being tested. 1 NQ/ES tick = 0.25 points, so 40 ticks = 10 points. 10 ticks (2.5 points) is very strict on NQ.")
 i_vwapAnchor = input.string("Daily", "VWAP anchor", options = ["Daily", "NY open 09:30"], group = G_ENTRY)
 i_maxTrades  = input.int(2, "Max trades per NY session", minval = 1, group = G_ENTRY)
-i_minRR      = input.float(1.0, "Min reward:risk to POC", minval = 0, step = 0.1, group = G_ENTRY)
+i_minRR      = input.float(1.0, "Min reward:risk (blended TP1/TP2)", minval = 0, step = 0.1, group = G_ENTRY,
+     tooltip = "Reward is the position-weighted average of TP1 (POC) and TP2, using the % closed at TP1. Set 0 to disable.")
 
 i_slMode     = input.string("Rejection candle", "Stop loss at", options = ["Rejection candle", "Beyond Asia level"], group = G_RISK)
 i_slBuf      = input.int(2, "Stop loss buffer (ticks)", minval = 0, group = G_RISK)
@@ -265,18 +267,51 @@ longRej  = low <= tradeVAL + i_touchTicks * tick and close > tradeVAL and (not i
 longVwap = math.abs(tradeVAL - vwapVal) <= i_vwapTicks * tick
 longSL   = math.min(i_slMode == "Rejection candle" ? low - buf : tradeVAL - buf, close - tick)
 longRisk = close - longSL
-longRew  = asiaPOC - close
+longTP2  = math.max(tradeVAH, asiaPOC + tick)
+longRew  = (i_tp1Pct * (asiaPOC - close) + (100 - i_tp1Pct) * (longTP2 - close)) / 100
 longSig  = allowLong and canEnter and longRej and (not i_vwapReq or longVwap) and
-     longRew > 0 and longRew >= i_minRR * longRisk
+     asiaPOC > close and longRew >= i_minRR * longRisk
 
 // SHORT: wick touches / pierces the Asia VAH, candle closes back below it
 shortRej  = high >= tradeVAH - i_touchTicks * tick and close < tradeVAH and (not i_approach or close[1] < tradeVAH)
 shortVwap = math.abs(tradeVAH - vwapVal) <= i_vwapTicks * tick
 shortSL   = math.max(i_slMode == "Rejection candle" ? high + buf : tradeVAH + buf, close + tick)
 shortRisk = shortSL - close
-shortRew  = close - asiaPOC
+shortTP2  = math.min(tradeVAL, asiaPOC - tick)
+shortRew  = (i_tp1Pct * (close - asiaPOC) + (100 - i_tp1Pct) * (close - shortTP2)) / 100
 shortSig  = allowShort and canEnter and not longSig and shortRej and (not i_vwapReq or shortVwap) and
-     shortRew > 0 and shortRew >= i_minRR * shortRisk
+     asiaPOC < close and shortRew >= i_minRR * shortRisk
+
+// -----------------------------------------------------------------------------
+// DIAGNOSTICS - why level touches did or did not become trades
+//   Each rejection candle at the Asia VAL / VAH during the NY entry window is
+//   counted once, against the first rule that blocked it.
+// -----------------------------------------------------------------------------
+var int dgTouch    = 0
+var int dgApproach = 0
+var int dgVwap     = 0
+var int dgRR       = 0
+var int dgOther    = 0
+var int dgSignals  = 0
+
+dgWindow = i_tradeNY and entryWindow and not flatNow and barstate.isconfirmed and levelsLive and not na(asiaPOC)
+dgLong   = allowLong  and low <= tradeVAL + i_touchTicks * tick and close > tradeVAL
+dgShort  = allowShort and high >= tradeVAH - i_touchTicks * tick and close < tradeVAH
+if dgWindow and (dgLong or dgShort)
+    dgTouch += 1
+    appOk  = dgLong ? (not i_approach or close[1] > tradeVAL) : (not i_approach or close[1] < tradeVAH)
+    vwapOk = not i_vwapReq or (dgLong ? longVwap : shortVwap)
+    rrOk   = dgLong ? (asiaPOC > close and longRew >= i_minRR * longRisk) : (asiaPOC < close and shortRew >= i_minRR * shortRisk)
+    if longSig or shortSig
+        dgSignals += 1
+    else if not appOk
+        dgApproach += 1
+    else if not vwapOk
+        dgVwap += 1
+    else if not rrOk
+        dgRR += 1
+    else
+        dgOther += 1
 
 // -----------------------------------------------------------------------------
 // ORDERS
@@ -288,7 +323,7 @@ if longSig
     pDir := 1
     pSL  := longSL
     pTP1 := asiaPOC
-    pTP2 := math.max(tradeVAH, asiaPOC + tick)
+    pTP2 := longTP2
     strategy.entry("Layup L", strategy.long, comment = "Layup L",
          alert_message = "Layup LONG " + syminfo.ticker + " SL " + str.tostring(pSL, format.mintick) + " TP1 " + str.tostring(pTP1, format.mintick))
     strategy.exit("L TP1", "Layup L", qty_percent = i_tp1Pct, limit = pTP1, stop = pSL, comment_profit = "TP1 POC", comment_loss = "SL")
@@ -299,7 +334,7 @@ if shortSig
     pDir := -1
     pSL  := shortSL
     pTP1 := asiaPOC
-    pTP2 := math.min(tradeVAL, asiaPOC - tick)
+    pTP2 := shortTP2
     strategy.entry("Layup S", strategy.short, comment = "Layup S",
          alert_message = "Layup SHORT " + syminfo.ticker + " SL " + str.tostring(pSL, format.mintick) + " TP1 " + str.tostring(pTP1, format.mintick))
     strategy.exit("S TP1", "Layup S", qty_percent = i_tp1Pct, limit = pTP1, stop = pSL, comment_profit = "TP1 POC", comment_loss = "SL")
@@ -403,7 +438,7 @@ f_pos(string s) =>
 
 tSize = i_tableSize == "Small" ? size.small : i_tableSize == "Normal" ? size.normal : size.tiny
 
-var table tbl = table.new(f_pos(i_tablePos), 4, 11, bgcolor = color.new(color.black, 20),
+var table tbl = table.new(f_pos(i_tablePos), 4, 13, bgcolor = color.new(color.black, 20),
      border_width = 1, border_color = color.new(color.gray, 70))
 
 f_cell(int c, int r, string txt, color tc = color.white, color bg = na) =>
@@ -422,7 +457,7 @@ f_pf(float gw, float gl) =>
 f_px(float v) =>
     na(v) ? "-" : str.tostring(v, format.mintick)
 
-if i_showTable and barstate.islast
+if i_showTable and (barstate.islast or barstate.islastconfirmedhistory)
     hdr  = color.new(color.gray, 30)
     lN   = array.get(stN, 0)
     sN   = array.get(stN, 1)
@@ -494,6 +529,15 @@ if i_showTable and barstate.islast
     f_cell(1, 10, state, color.white, hdr)
     f_cell(2, 10, inTrade ? "SL " + f_px(pSL) : "Today " + str.tostring(tradesToday) + "/" + str.tostring(i_maxTrades), color.white, hdr)
     f_cell(3, 10, inTrade ? "TP1 " + f_px(pTP1) : "", color.white, hdr)
+
+    f_cell(0, 11, "Level touches")
+    f_cell(1, 11, str.tostring(dgTouch))
+    f_cell(2, 11, "Signals " + str.tostring(dgSignals), color.new(color.lime, 0))
+    f_cell(3, 11, "Other ✖ " + str.tostring(dgOther))
+    f_cell(0, 12, "Blocked by")
+    f_cell(1, 12, "Approach ✖ " + str.tostring(dgApproach), color.new(color.orange, 0))
+    f_cell(2, 12, "VWAP ✖ " + str.tostring(dgVwap), color.new(color.orange, 0))
+    f_cell(3, 12, "R:R ✖ " + str.tostring(dgRR), color.new(color.orange, 0))
 
 // -----------------------------------------------------------------------------
 // ALERTS  (create the alert with "alert() function calls only", or use "Order fills")
