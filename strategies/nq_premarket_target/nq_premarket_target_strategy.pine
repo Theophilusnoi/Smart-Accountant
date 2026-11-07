@@ -373,6 +373,7 @@ var int cSkipRR    = 0
 var int cSkipOther = 0
 var int cNoConf    = 0
 var int cNoTouch   = 0
+var int cTgtFirst  = 0
 
 eps = tick * 2
 
@@ -618,6 +619,9 @@ if dayLive and time_close >= mktExitTs
     else if dTouch > 0
         cNoConf += 1
         res := "NO TRADE — level touched " + str.tostring(dTouch) + "x, no confirmation"
+    else if (bias == "LONG" and hiSince >= pmH) or (bias == "SHORT" and loSince <= pmL)
+        cTgtFirst += 1
+        res := "NO TRADE — target (" + (bias == "LONG" ? "PMH" : "PML") + ") hit before any pullback (no chase)"
     else
         cNoTouch += 1
         res := "NO TRADE — no pullback/bounce to a key level"
@@ -853,7 +857,7 @@ bgcolor(showBg and time >= hardFlatTs and time < f_ts(9, 45, 0) ? color.new(colo
 
 // ─────────────────────────────── STATUS TABLE ───────────────────────────────
 tblPos = tblPosStr == "Top right" ? position.top_right : tblPosStr == "Bottom right" ? position.bottom_right : tblPosStr == "Top left" ? position.top_left : position.bottom_left
-var table tb = table.new(tblPos, 2, 22, bgcolor = color.new(color.black, 20), border_width = 1)
+var table tb = table.new(tblPos, 2, 23, bgcolor = color.new(color.black, 20), border_width = 1)
 tblTxt = tblSizeStr == "Tiny" ? size.tiny : tblSizeStr == "Small" ? size.small : size.normal
 f_row(int r, string k, string v, color c) =>
     table.cell(tb, 0, r, k, text_color = color.silver, text_size = tblTxt, text_halign = text.align_left)
@@ -885,4 +889,5 @@ if showTable and barstate.islast
         f_row(18, "Skipped: R:R < min", f_pct(cSkipRR), color.orange)
         f_row(19, "Skipped: other", f_pct(cSkipOther), color.orange)
         f_row(20, "No confirmation at level", f_pct(cNoConf), color.silver)
-        f_row(21, "Never reached a level", f_pct(cNoTouch), color.silver)
+        f_row(21, "Target hit before pullback", f_pct(cTgtFirst), color.silver)
+        f_row(22, "Never reached a level", f_pct(cNoTouch), color.silver)
