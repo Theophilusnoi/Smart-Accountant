@@ -33,7 +33,10 @@ If 1% risk buys less than 1 NQ contract, the trade is **skipped** by default. Us
 ## Not automatable in Pine
 Halts and bid/ask spread blowouts (G.1.5–6) can't be detected from chart data, so the trader must enforce them. Scheduled news must be entered by hand.
 
-## Optional switches (spec behaviour is the default)
+## Rule set
+**Rule set = NQ-tuned** (default) switches on all three options below at once: max stop of at least 0.40%, the swing stop anchor, and half-risk trading on conflict days. **Strict spec** follows the QQQ document exactly.
+
+## Optional switches (used by "Strict spec")
 - **Stop anchor:** the spec puts the stop beyond the low/high since 09:30. The alternative is the swing at the touched level, which gives a tighter stop when the open spiked first.
 - **Gap vs momentum conflict:** the spec says NO TRADE. The alternative is the G.3 exception: trade at half risk with the bias taken from momentum and PM-range position.
 - **Max stop distance:** the spec's 0.25% was tuned for QQQ. Try 0.35–0.40% on NQ.
