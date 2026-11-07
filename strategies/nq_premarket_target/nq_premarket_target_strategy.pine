@@ -1,0 +1,783 @@
+//@version=6
+// ============================================================================
+//  MARKET OPEN PRE-MARKET TARGET STRATEGY — NQ / MNQ futures edition (v1.0)
+// ----------------------------------------------------------------------------
+//  Trades only the first ~10 minutes after the 09:30 ET cash open, targeting
+//  the pre-market high (PMH) or low (PML). Flat before the 15-min ORB forms.
+//
+//  Chart requirements:
+//    • NQ1! / MNQ1! (or a dated contract), 1-minute chart (sub-minute works too)
+//    • Extended-hours data (futures charts include it by default)
+//
+//  Hard rules encoded as constants (not inputs, by design):
+//    09:30:00 entry window opens    09:39:30 resting TP limits cancelled
+//    09:39:45 market exit           09:40:00 MUST BE FLAT — strategy void
+//  On a 1-minute chart the last bar that can trigger an entry is the 09:38
+//  bar (closes 09:39:00); positions still open are flattened on the close of
+//  the 09:39 bar (= 09:40:00). Use a 15s/30s chart for exact 09:39:30/45 timing.
+// ============================================================================
+strategy("NQ Market-Open Pre-Market Target", shorttitle = "NQ PM-Target", overlay = true,
+     initial_capital = 100000, currency = currency.USD,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     pyramiding = 0, process_orders_on_close = true,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 2.5,
+     slippage = 2, backtest_fill_limits_assumption = 1,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
+
+const string TZ = "America/New_York"
+
+// ─────────────────────────────── INPUTS ─────────────────────────────────────
+grpSes = "Sessions (ET)"
+pmSess    = input.session("0400-0930", "Pre-market window", group = grpSes, tooltip = "PMH / PML / pm_open are taken from this window. Spec default 04:00–09:30 ET. Use 1800-0930 to treat the full Globex overnight as 'pre-market'.")
+onSess    = input.session("1800-0930", "Globex overnight window", group = grpSes, tooltip = "Overnight high/low are added as extra key levels when they differ from PMH/PML.")
+rthSess   = input.session("0930-1600", "Regular session (prior close / prior day H-L-VWAP)", group = grpSes)
+momStart  = input.int(915, "Momentum start (HHMM)", minval = 400, maxval = 929, group = grpSes, tooltip = "pm_momentum = sign(last pre-market price − price at this time).")
+
+grpRisk = "Risk & sizing"
+riskPct      = input.float(1.0, "Risk per trade (% equity)", minval = 0.1, maxval = 1.0, step = 0.1, group = grpRisk, tooltip = "Spec: 1%, may be reduced to 0.5%, never above 1%.")
+maxContracts = input.int(10, "Max contracts", minval = 1, group = grpRisk, tooltip = "Replaces the equity '2% notional' cap from the QQQ version, which is meaningless for futures (one NQ ≈ $400k+ notional).")
+sizeFallback = input.string("Skip trade", "If 1% risk buys < 1 contract", options = ["Skip trade", "Trade 1 contract"], group = grpRisk, tooltip = "On small accounts switch the chart to MNQ instead of overriding risk.")
+maxStopPct   = input.float(0.25, "Max stop distance (%)", step = 0.01, group = grpRisk)
+minRR        = input.float(1.5, "Min R:R to TP1", step = 0.1, group = grpRisk)
+bufferPct    = input.float(0.02, "Stop buffer (% of price, min 1 tick)", step = 0.01, group = grpRisk)
+maxTrades    = input.int(2, "Max trades per day", minval = 1, maxval = 2, group = grpRisk, tooltip = "2nd trade only after a losing 1st trade.")
+
+grpTP = "Targets & management"
+tp1Pct      = input.int(50, "% of position taken at TP1", minval = 50, maxval = 100, group = grpTP)
+strongBody  = input.float(60, "Strong candle body (% of range)", group = grpTP)
+boVolMult   = input.float(1.5, "TP2 breakout volume ≥ x × 5-bar avg", step = 0.1, group = grpTP)
+trailPct    = input.float(0.15, "Runner fixed trail (%)", step = 0.01, group = grpTP, tooltip = "Runner trails the 1-min candle low/high or this %, whichever is tighter, never looser than breakeven.")
+earlyExit   = input.bool(false, "Flatten at 09:39:00 if TP1 not yet hit", group = grpTP, tooltip = "Conservative reading of F.2 'active exit mode'. When on, the last entry bar is the 09:37 bar.")
+
+grpEnt = "Entry rules"
+entryTrig   = input.string("Close of confirmation", "Entry trigger", options = ["Close of confirmation", "Break of confirmation high/low"], group = grpEnt)
+breakBars   = input.int(2, "Break order valid for N bars", minval = 1, group = grpEnt)
+supProxPct  = input.float(0.05, "Support/resistance touch proximity (%)", step = 0.01, group = grpEnt)
+confirmBars = input.int(3, "Confirmation must appear within N bars of touch", minval = 0, group = grpEnt)
+useRev      = input.bool(true, "Confirm: reversal candle", group = grpEnt)
+useHL       = input.bool(true, "Confirm: higher low / lower high", group = grpEnt)
+useVU       = input.bool(true, "Confirm: volume uptick", group = grpEnt)
+confVolMult = input.float(1.5, "Volume uptick ≥ x × prior 5-bar avg", step = 0.1, group = grpEnt)
+reqDirClose = input.bool(true, "Confirmation candle must close in trade direction", group = grpEnt, tooltip = "Safety filter (not in spec): stops a bearish candle from 'confirming' a long via the volume/higher-low clauses alone.")
+useExt      = input.bool(true, "Enable extended case (open at PMH/PML + strong 1st candle)", group = grpEnt)
+extProxPct  = input.float(0.10, "Extended case: open within (%) of PM extreme", step = 0.01, group = grpEnt)
+extVolMult  = input.float(2.0, "Extended case: 1st candle volume ≥ x × prior 5-bar avg", step = 0.1, group = grpEnt)
+
+grpFil = "No-trade filters"
+minRangePct = input.float(0.25, "Min pre-market range (% of price)", step = 0.01, group = grpFil)
+keyProxPct  = input.float(0.15, "Chop filter: key level within (%)", step = 0.01, group = grpFil)
+chkLvlPct   = input.float(0.30, "Checklist: key level within (%) of open on bias side", step = 0.01, group = grpFil)
+flatGapTick = input.int(2, "Gap ≤ N ticks counts as flat", minval = 0, group = grpFil)
+newsToday   = input.bool(false, "Today has high-impact news 09:30–09:45 (NO TRADE)", group = grpFil)
+newsDates   = input.text_area("", "News / no-trade dates (YYYY-MM-DD, comma separated)", group = grpFil, tooltip = "FOMC, CPI, NFP, PPI, mega-cap earnings... Days listed here are skipped in backtest and live.")
+
+grpLvl = "Key levels (green lines)"
+usePD       = input.bool(true, "Prior day high / low / close", group = grpLvl)
+useVWAP     = input.bool(true, "Prior day RTH VWAP", group = grpLvl)
+useON       = input.bool(true, "Overnight high / low", group = grpLvl)
+useRound    = input.bool(true, "Round numbers", group = grpLvl)
+roundStep   = input.float(100, "Round-number step (points)", minval = 5, group = grpLvl, tooltip = "NQ: 100 (or 50 for finer levels).")
+roundRange  = input.float(0.5, "Round numbers within ±(%) of price", step = 0.1, group = grpLvl)
+useSwing    = input.bool(true, "Swing highs/lows of prior 2–3 sessions", group = grpLvl)
+swingRange  = input.float(1.5, "Swings within ±(%) of price", step = 0.1, group = grpLvl)
+manualLv    = input.string("", "Manual levels (comma separated prices)", group = grpLvl)
+manualDate  = input.string("", "Manual levels apply only on date (YYYY-MM-DD, blank = every day)", group = grpLvl)
+
+grpVis = "Display"
+showLevels = input.bool(true, "Draw key levels", group = grpVis)
+showTable  = input.bool(true, "Show status table", group = grpVis)
+showBg     = input.bool(true, "Shade entry window", group = grpVis)
+
+// ─────────────────────────────── TIME HELPERS ───────────────────────────────
+etY    = year(time, TZ)
+etM    = month(time, TZ)
+etD    = dayofmonth(time, TZ)
+dayKey = etY * 10000 + etM * 100 + etD
+todayStr = str.format_time(time, "yyyy-MM-dd", TZ)
+
+f_ts(int h, int m, int s) => timestamp(TZ, etY, etM, etD, h, m, s)
+
+openTs     = f_ts(9, 30, 0)
+activeTs   = f_ts(9, 39, 0)    // active exit mode
+cancelTs   = f_ts(9, 39, 30)   // cancel resting limits
+mktExitTs  = f_ts(9, 39, 45)   // market exit
+hardFlatTs = f_ts(9, 40, 0)    // ORB cutoff — must be flat
+entryEndTs = f_ts(9, 39, 59)
+momH = int(math.floor(momStart / 100))
+momM = momStart % 100
+entryCutoffTs = earlyExit ? activeTs : mktExitTs
+
+inPM  = not na(time(timeframe.period, pmSess + ":23456", TZ))
+inON  = not na(time(timeframe.period, onSess + ":1234567", TZ))
+inRTH = not na(time(timeframe.period, rthSess + ":23456", TZ))
+
+tick = syminfo.mintick
+avg5 = ta.sma(volume, 5)[1]
+
+f_floorTick(float p) => math.floor(p / tick) * tick
+f_ceilTick(float p)  => math.ceil(p / tick) * tick
+f_buf(float px)      => f_ceilTick(math.max(bufferPct / 100 * px, tick))
+
+// ─────────────────────────────── PRE-MARKET TRACKING ────────────────────────
+var float pmH    = na
+var float pmL    = na
+var float pmO    = na
+var float pmLast = na
+var float p915   = na
+var int   pmKey  = 0
+
+pmStart = inPM and not inPM[1]
+if pmStart
+    pmH   := high
+    pmL   := low
+    pmO   := open
+    p915  := na
+    pmKey := dayKey
+if inPM
+    pmH    := math.max(pmH, high)
+    pmL    := math.min(pmL, low)
+    pmLast := close
+    if na(p915) and time >= f_ts(momH, momM, 0)
+        p915 := open
+
+var float onH = na
+var float onL = na
+onStart = inON and not inON[1]
+if onStart
+    onH := high
+    onL := low
+else if inON
+    onH := math.max(onH, high)
+    onL := math.min(onL, low)
+
+// ─────────────────────────────── PRIOR RTH SESSION ──────────────────────────
+var float rH  = na
+var float rL  = na
+var float rPV = 0.0
+var float rV  = 0.0
+var float pdH  = na
+var float pdL  = na
+var float pdC  = na
+var float pdVW = na
+var array<float> pastH = array.new<float>()
+var array<float> pastL = array.new<float>()
+
+rthStart = inRTH and not inRTH[1]
+rthEnd   = not inRTH and inRTH[1]
+if rthEnd
+    pdH  := rH
+    pdL  := rL
+    pdC  := close[1]
+    pdVW := rV > 0 ? rPV / rV : na
+    array.unshift(pastH, rH)
+    array.unshift(pastL, rL)
+    if array.size(pastH) > 5
+        array.pop(pastH)
+        array.pop(pastL)
+// note: the rthStart block of this section runs AFTER the day setup below, so
+// that today's open bar still sees yesterday's values in pdH/pdL/pdC.
+
+// ─────────────────────────────── KEY LEVELS ─────────────────────────────────
+var array<float>  lvP = array.new<float>()
+var array<string> lvT = array.new<string>()
+
+f_add(float p, string t) =>
+    if not na(p)
+        float q = math.round_to_mintick(p)
+        int dup = -1
+        for [i, x] in lvP
+            if math.abs(x - q) < tick * 0.5
+                dup := i
+        if dup >= 0
+            array.set(lvT, dup, array.get(lvT, dup) + "/" + t)
+        else
+            array.push(lvP, q)
+            array.push(lvT, t)
+
+f_nextAbove(float px, float eps) =>
+    float best = na
+    string tag = ""
+    for [i, p] in lvP
+        if p > px + eps and (na(best) or p < best)
+            best := p
+            tag  := array.get(lvT, i)
+    [best, tag]
+
+f_nextBelow(float px, float eps) =>
+    float best = na
+    string tag = ""
+    for [i, p] in lvP
+        if p < px - eps and (na(best) or p > best)
+            best := p
+            tag  := array.get(lvT, i)
+    [best, tag]
+
+f_anyWithin(float px, float dist) =>
+    bool found = false
+    for p in lvP
+        if math.abs(p - px) <= dist
+            found := true
+    found
+
+// side: +1 = a level at/below px (support), -1 = at/above px (resistance)
+f_sideWithin(float px, float dist, int side) =>
+    bool found = false
+    for p in lvP
+        if side > 0 and p <= px and px - p <= dist
+            found := true
+        if side < 0 and p >= px and p - px <= dist
+            found := true
+    found
+
+// Long: highest support (below PMH) that this bar's low reached within prox and did not close through
+f_supportTouch(float lo, float cl, float prox, float ceiling) =>
+    float best = na
+    string tag = ""
+    for [i, p] in lvP
+        if p < ceiling - prox and lo <= p + prox and cl >= p - prox
+            if na(best) or p > best
+                best := p
+                tag  := array.get(lvT, i)
+    [best, tag]
+
+// Short: lowest resistance (above PML) that this bar's high reached within prox and did not close through
+f_resistTouch(float hi, float cl, float prox, float floorPx) =>
+    float best = na
+    string tag = ""
+    for [i, p] in lvP
+        if p > floorPx + prox and hi >= p - prox and cl <= p + prox
+            if na(best) or p < best
+                best := p
+                tag  := array.get(lvT, i)
+    [best, tag]
+
+// ─────────────────────────────── RISK HELPERS ───────────────────────────────
+// returns [ok, qty, q1, q2, rr, why]
+f_check(bool isLong, float e, float sl, float t1) =>
+    float risk = isLong ? e - sl : sl - e
+    float rew  = na(t1) ? na : (isLong ? t1 - e : e - t1)
+    bool  ok   = true
+    string why = ""
+    float rr   = na
+    int qty = 0
+    int q1  = 0
+    int q2  = 0
+    if na(t1)
+        ok  := false
+        why := "no TP1 level"
+    else if risk <= 0 or rew <= 0
+        ok  := false
+        why := "invalid stop/target geometry"
+    else if risk / e > maxStopPct / 100
+        ok  := false
+        why := "stop " + str.tostring(risk / e * 100, "#.###") + "% > max"
+    else
+        rr := rew / risk
+        if rr < minRR
+            ok  := false
+            why := "R:R " + str.tostring(rr, "#.##") + " < " + str.tostring(minRR)
+        else
+            qty := int(math.floor(strategy.equity * riskPct / 100 / (risk * syminfo.pointvalue)))
+            if qty < 1 and sizeFallback == "Trade 1 contract"
+                qty := 1
+            qty := math.min(qty, maxContracts)
+            if qty < 1
+                ok  := false
+                why := "1% risk < 1 contract (risk/ct $" + str.tostring(risk * syminfo.pointvalue, "#") + ")"
+            else
+                q1 := qty >= 2 ? math.min(qty, int(math.ceil(qty * tp1Pct / 100.0))) : qty
+                q2 := qty - q1
+    [ok, qty, q1, q2, rr, why]
+
+f_place(bool isLong, float e, float sl, float t1, int qty, int q1, int q2, bool useBreak, string tag) =>
+    string eid = isLong ? "L" : "S"
+    if useBreak
+        strategy.entry(eid, isLong ? strategy.long : strategy.short, qty = qty, stop = e, comment = tag)
+    else
+        strategy.entry(eid, isLong ? strategy.long : strategy.short, qty = qty, comment = tag)
+    strategy.exit(eid + "-TP1", from_entry = eid, qty = q1, stop = sl, limit = t1, comment_profit = "TP1", comment_loss = "STOP")
+    if q2 > 0
+        strategy.exit(eid + "-RUN", from_entry = eid, qty = q2, stop = sl, comment_profit = "RUN", comment_loss = "STOP")
+
+// ─────────────────────────────── DAY STATE ──────────────────────────────────
+var string bias       = "NONE"
+var bool   extBias    = false
+var string dayStatus  = "Waiting for open"
+var bool   active     = false
+var int    activeKey  = 0
+var float  openPx     = na
+var float  priceNow   = na
+var float  gapTop     = na
+var float  gapBot     = na
+var int    gapDir     = 0
+var int    pmMom      = 0
+var float  pmRange    = na
+var float  primaryTgt = na
+var float  secondTgt  = na
+
+// pullback / setup tracking
+var float  pbLow    = na
+var float  pbHigh   = na
+var float  hiSince  = na
+var float  loSince  = na
+var int    touchBar = na
+var float  touchLvl = na
+var float  touchExt = na
+var string touchTag = ""
+
+// trade state: 0 idle, 1 pending break order, 2 in trade
+var int    state      = 0
+var int    tradeCount = 0
+var bool   lastWin    = false
+var int    orderBar   = na
+var int    entryBar   = na
+var int    closedBase = 0
+var float  netBase    = 0.0
+var bool   isLongTrd  = true
+var float  entryPx    = na
+var float  slPx       = na
+var float  tp1Px      = na
+var float  tp2Px      = na
+var int    entryQty   = 0
+var int    q1v        = 0
+var int    q2v        = 0
+var bool   tp1Done    = false
+var bool   tp2Active  = false
+var bool   limitsOff  = false
+var float  runStop    = na
+var string setupName  = ""
+var string lastTrade  = "—"
+
+eps = tick * 2
+
+// ─────────────────────────────── 09:30 OPEN: DAY SETUP (B.1–B.5, G.1) ───────
+if rthStart
+    if state == 1
+        strategy.cancel("L")
+        strategy.cancel("S")
+    state      := 0
+    tradeCount := 0
+    lastWin    := false
+    active     := false
+    activeKey  := dayKey
+    bias       := "NONE"
+    extBias    := false
+    primaryTgt := na
+    secondTgt  := na
+    pbLow      := na
+    pbHigh     := na
+    hiSince    := na
+    loSince    := na
+    touchBar   := na
+    touchLvl   := na
+    touchExt   := na
+    lastTrade  := "—"
+    openPx     := open
+    priceNow   := pmLast
+    array.clear(lvP)
+    array.clear(lvT)
+
+    bool dataOk = pmKey == dayKey and not na(pmH) and not na(pmL) and not na(pdC) and not na(pmO)
+    string why = ""
+    if not dataOk
+        why := "Missing pre-market or prior-close data"
+    else
+        pmRange := pmH - pmL
+        gapTop  := math.max(pdC, pmO)
+        gapBot  := math.min(pdC, pmO)
+        float gapSize = gapTop - gapBot
+        gapDir  := gapSize <= flatGapTick * tick ? 0 : (pmO > pdC ? 1 : -1)
+        pmMom   := na(p915) ? 0 : (priceNow > p915 ? 1 : priceNow < p915 ? -1 : 0)
+
+        // --- key levels (B.3) ---
+        f_add(pmH, "PMH")
+        f_add(pmL, "PML")
+        f_add(gapTop, gapDir == 0 ? "Prior close" : "Gap top")
+        f_add(gapBot, gapDir == 0 ? "Prior close" : "Gap bottom")
+        if usePD
+            f_add(pdH, "PDH")
+            f_add(pdL, "PDL")
+            f_add(pdC, "PDC")
+        if useVWAP
+            f_add(pdVW, "PD VWAP")
+        if useON and not na(onH)
+            if math.abs(onH - pmH) >= tick
+                f_add(onH, "ONH")
+            if math.abs(onL - pmL) >= tick
+                f_add(onL, "ONL")
+        if useRound
+            float rLo = math.floor(priceNow * (1 - roundRange / 100) / roundStep) * roundStep
+            float rHi = priceNow * (1 + roundRange / 100)
+            float r = rLo
+            while r <= rHi
+                if r >= priceNow * (1 - roundRange / 100)
+                    f_add(r, "Round " + str.tostring(r))
+                r += roundStep
+        if useSwing and array.size(pastH) > 1
+            int last = math.min(array.size(pastH) - 1, 2)
+            for k = 1 to last
+                float sh = array.get(pastH, k)
+                float sl = array.get(pastL, k)
+                if math.abs(sh - priceNow) <= swingRange / 100 * priceNow
+                    f_add(sh, "Swing H d-" + str.tostring(k + 1))
+                if math.abs(sl - priceNow) <= swingRange / 100 * priceNow
+                    f_add(sl, "Swing L d-" + str.tostring(k + 1))
+        if str.length(str.trim(manualLv)) > 0 and (str.length(str.trim(manualDate)) == 0 or str.trim(manualDate) == todayStr)
+            for s in str.split(manualLv, ",")
+                f_add(str.tonumber(str.trim(s)), "Manual")
+
+        // --- bias (B.4) ---
+        float mid   = (pmH + pmL) / 2
+        bool  nearH = priceNow >= pmH - extProxPct / 100 * priceNow
+        bool  nearL = priceNow <= pmL + extProxPct / 100 * priceNow
+        if priceNow >= mid and pmMom > 0 and gapDir >= 0
+            bias := "LONG"
+        else if priceNow <= mid and pmMom < 0 and gapDir <= 0
+            bias := "SHORT"
+        else if nearH and pmMom > 0
+            bias    := "LONG"
+            extBias := true
+        else if nearL and pmMom < 0
+            bias    := "SHORT"
+            extBias := true
+
+        // --- no-trade filters (G.1) & checklist (B.5) ---
+        bool chop = gapSize > 0 and priceNow >= gapBot + 0.3 * gapSize and priceNow <= gapBot + 0.7 * gapSize and not f_anyWithin(priceNow, keyProxPct / 100 * priceNow)
+        if pmRange < minRangePct / 100 * priceNow
+            why := "Narrow PM range " + str.tostring(pmRange / priceNow * 100, "#.###") + "%"
+        else if newsToday or (str.length(newsDates) > 0 and str.contains(newsDates, todayStr))
+            why := "News / event day"
+        else if bias == "NONE"
+            why := gapDir != 0 and pmMom != 0 and gapDir != pmMom ? "Conflicting bias (gap vs momentum)" : "No valid bias"
+        else if chop
+            why := "Mid-gap chop, no key level nearby"
+        else if not f_sideWithin(openPx, chkLvlPct / 100 * openPx, bias == "LONG" ? 1 : -1)
+            why := "No key level within " + str.tostring(chkLvlPct) + "% of open on bias side"
+
+        if bias == "LONG"
+            [tA, tAt] = f_nextAbove(pmH, eps)
+            primaryTgt := extBias ? tA : pmH
+        else if bias == "SHORT"
+            [tB, tBt] = f_nextBelow(pmL, eps)
+            primaryTgt := extBias ? tB : pmL
+        if not na(primaryTgt)
+            if bias == "LONG"
+                [sA, sAt] = f_nextAbove(primaryTgt, eps)
+                secondTgt := sA
+            else
+                [sB, sBt] = f_nextBelow(primaryTgt, eps)
+                secondTgt := sB
+
+    if why == ""
+        active    := true
+        dayStatus := "ACTIVE — " + bias + (extBias ? " (extended)" : "") + ", watching for setup"
+        alert("NQ PM-Target " + todayStr + ": bias " + bias + (extBias ? " (extended)" : "") + "  PMH " + str.tostring(pmH, format.mintick) + "  PML " + str.tostring(pmL, format.mintick), alert.freq_once_per_bar_close)
+    else
+        bias      := "NONE"
+        dayStatus := "NO TRADE — " + why
+    log.info("{0} | PMH {1} PML {2} range {3} | gap {4}..{5} dir {6} | mom {7} | bias {8} | {9}", todayStr, pmH, pmL, pmRange, gapBot, gapTop, gapDir, pmMom, bias, dayStatus)
+
+// prior-RTH accumulators start AFTER the day setup consumed yesterday's values
+if rthStart
+    rH  := high
+    rL  := low
+    rPV := hlc3 * volume
+    rV  := volume
+else if inRTH
+    rH  := math.max(rH, high)
+    rL  := math.min(rL, low)
+    rPV += hlc3 * volume
+    rV  += volume
+
+dayLive = active and activeKey == dayKey
+eid = isLongTrd ? "L" : "S"
+
+// ─────────────────────────────── PENDING BREAK ORDER ────────────────────────
+if state == 1 and bar_index > orderBar
+    bool filled = strategy.opentrades > 0 or strategy.closedtrades > closedBase
+    if filled
+        state      := 2
+        tradeCount += 1
+        entryBar   := bar_index - 1
+        if strategy.opentrades > 0
+            entryPx := strategy.opentrades.entry_price(0)
+    else if bar_index - orderBar >= breakBars or time_close >= entryCutoffTs or (isLongTrd ? high >= tp1Px : low <= tp1Px)
+        strategy.cancel(eid)
+        state     := 0
+        dayStatus := "Break order expired — watching for setup"
+
+// ─────────────────────────────── TRADE MANAGEMENT (E) ───────────────────────
+if state == 2 and bar_index > entryBar
+    if strategy.opentrades == 0
+        if strategy.closedtrades > closedBase
+            float pnl = strategy.netprofit - netBase
+            lastWin   := pnl > 0
+            string exitWhy = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
+            lastTrade := (isLongTrd ? "LONG " : "SHORT ") + str.tostring(entryPx, format.mintick) + " → " + exitWhy + "  $" + str.tostring(pnl, "#,###")
+            log.info("TRADE {0} | {1} | entry {2} stop {3} TP1 {4} TP2 {5} qty {6} | exit {7} at {8} | PnL {9} | flat by 09:40: {10}", todayStr, setupName, entryPx, slPx, tp1Px, tp2Px, entryQty, exitWhy, str.format_time(strategy.closedtrades.exit_time(strategy.closedtrades - 1), "HH:mm:ss", TZ), pnl, strategy.closedtrades.exit_time(strategy.closedtrades - 1) <= hardFlatTs ? "yes" : "NO")
+            alert("NQ PM-Target: " + lastTrade, alert.freq_once_per_bar_close)
+        state     := 0
+        pbLow     := na
+        pbHigh    := na
+        touchLvl  := na
+        touchBar  := na
+        dayStatus := lastWin ? "Winner — done for the day" : (tradeCount < maxTrades and time_close < entryCutoffTs ? "Stopped — watching for 2nd setup" : "Done for the day")
+    else
+        // TP1 filled → runner: stop to breakeven, decide TP2 vs trail (E.1–E.3)
+        if not tp1Done and q2v > 0 and math.abs(strategy.position_size) <= q2v
+            tp1Done := true
+            float rng = high - low
+            bool strongBO = rng > 0 and math.abs(close - open) >= strongBody / 100 * rng and volume >= boVolMult * avg5 and (isLongTrd ? close > open : close < open)
+            tp2Active := strongBO and not na(tp2Px) and not limitsOff
+            runStop   := entryPx
+            dayStatus := "TP1 hit — runner " + (tp2Active ? "→ TP2 " + str.tostring(tp2Px, format.mintick) : "trailing")
+            alert("NQ PM-Target: TP1 hit, " + dayStatus, alert.freq_once_per_bar_close)
+        if tp1Done
+            if not tp2Active
+                float trailC = isLongTrd ? f_floorTick(math.max(low, close * (1 - trailPct / 100))) : f_ceilTick(math.min(high, close * (1 + trailPct / 100)))
+                runStop := isLongTrd ? math.max(runStop, entryPx, trailC) : math.min(runStop, entryPx, trailC)
+            strategy.exit(eid + "-RUN", from_entry = eid, qty = q2v, stop = runStop, limit = tp2Active ? tp2Px : na, comment_profit = "TP2", comment_loss = runStop == entryPx ? "BE" : "TRAIL")
+
+// ─────────────────────────────── HARD TIME EXIT (F) ─────────────────────────
+if strategy.opentrades > 0
+    if earlyExit and not tp1Done and time_close >= activeTs
+        strategy.close_all(comment = "ACTIVE EXIT 09:39")
+    else if time >= hardFlatTs
+        strategy.close_all(comment = "FORCED ORB CUTOFF")
+        log.warning("{0}: position not flat by 09:40:00 — forced exit", todayStr)
+    else if time_close >= mktExitTs
+        strategy.close_all(comment = "TIME EXIT 09:39:45")
+    else if time_close >= cancelTs and not limitsOff
+        // 09:39:30 — cancel resting TP limits, keep protective stops only
+        limitsOff := true
+        tp2Active := false
+        if not tp1Done
+            strategy.exit(eid + "-TP1", from_entry = eid, qty = q1v, stop = slPx, comment_loss = "STOP")
+        if q2v > 0
+            strategy.exit(eid + "-RUN", from_entry = eid, qty = q2v, stop = tp1Done ? runStop : slPx, comment_loss = "STOP")
+if dayLive and time_close >= mktExitTs
+    active    := false
+    if state == 0 and str.startswith(dayStatus, "ACTIVE")
+        dayStatus := "No setup — window closed"
+
+// ─────────────────────────────── SETUP TRACKING ─────────────────────────────
+if dayLive and time >= openTs and time_close <= hardFlatTs
+    hiSince := na(hiSince) ? high : math.max(hiSince, high)
+    loSince := na(loSince) ? low  : math.min(loSince, low)
+    pbLow   := na(pbLow)   ? low  : math.min(pbLow, low)
+    pbHigh  := na(pbHigh)  ? high : math.max(pbHigh, high)
+
+// ─────────────────────────────── ENTRY LOGIC (C) ────────────────────────────
+inEntryWin = dayLive and time >= openTs and time_close <= entryEndTs and time_close < entryCutoffTs
+canTrade   = inEntryWin and state == 0 and strategy.opentrades == 0 and tradeCount < maxTrades and not (tradeCount > 0 and lastWin)
+useBreak   = entryTrig == "Break of confirmation high/low"
+
+bool   cand   = false
+bool   cLong  = true
+float  cE     = na
+float  cSL    = na
+float  cT1    = na
+float  cT2    = na
+int    cQty   = 0
+int    cQ1    = 0
+int    cQ2    = 0
+float  cRR    = na
+bool   cBrk   = false
+string cTag   = ""
+string skipWhy = ""
+
+float rngB = high - low
+float body = math.abs(close - open)
+float prox = supProxPct / 100 * close
+
+if canTrade
+    // ---- C.3 extended case: first 1-min candle only ----
+    if useExt and rthStart and tradeCount == 0
+        bool strongFirst = rngB > 0 and body >= strongBody / 100 * rngB and volume >= extVolMult * avg5
+        if bias == "LONG" and math.abs(openPx - pmH) <= extProxPct / 100 * openPx and strongFirst and close > open
+            float e  = close
+            float sl = f_floorTick(low - f_buf(e))
+            [t1, t1t] = f_nextAbove(math.max(pmH, e), eps)
+            [t2, t2t] = f_nextAbove(nz(t1, e), eps)
+            [ok, q, a, b, rr, w] = f_check(true, e, sl, t1)
+            if ok
+                cand := true
+                cLong := true
+                cE := e
+                cSL := sl
+                cT1 := t1
+                cT2 := t2
+                cQty := q
+                cQ1 := a
+                cQ2 := b
+                cRR := rr
+                cBrk := false
+                cTag := "EXT LONG"
+            else
+                skipWhy := "Extended long skipped: " + w
+        else if bias == "SHORT" and math.abs(openPx - pmL) <= extProxPct / 100 * openPx and strongFirst and close < open
+            float e  = close
+            float sl = f_ceilTick(high + f_buf(e))
+            [t1, t1t] = f_nextBelow(math.min(pmL, e), eps)
+            [t2, t2t] = f_nextBelow(nz(t1, e), eps)
+            [ok, q, a, b, rr, w] = f_check(false, e, sl, t1)
+            if ok
+                cand := true
+                cLong := false
+                cE := e
+                cSL := sl
+                cT1 := t1
+                cT2 := t2
+                cQty := q
+                cQ1 := a
+                cQ2 := b
+                cRR := rr
+                cBrk := false
+                cTag := "EXT SHORT"
+            else
+                skipWhy := "Extended short skipped: " + w
+
+    // ---- C.1 standard long: pullback to support + bullish confirmation ----
+    if not cand and bias == "LONG" and hiSince < pmH
+        [lv, tg] = f_supportTouch(low, close, prox, pmH)
+        if not na(lv)
+            touchBar := bar_index
+            touchLvl := lv
+            touchExt := low
+            touchTag := tg
+        if not na(touchLvl) and bar_index - touchBar <= confirmBars
+            float lw  = math.min(open, close) - low
+            bool rev  = rngB > 0 and close > open and close >= low + 0.66 * rngB and lw >= 0.5 * rngB
+            bool hl   = bar_index > touchBar and low > touchExt
+            bool vu   = volume >= confVolMult * avg5
+            bool conf = (useRev and rev) or (useHL and hl) or (useVU and vu)
+            if conf and (not reqDirClose or close > open) and close >= touchLvl - prox
+                float e  = useBreak ? high + tick : close
+                float sl = f_floorTick(pbLow - f_buf(e))
+                [t2, t2t] = f_nextAbove(pmH, eps)
+                [ok, q, a, b, rr, w] = f_check(true, e, sl, pmH)
+                string cf = (rev ? "rev " : "") + (hl ? "HL " : "") + (vu ? "vol" : "")
+                if ok
+                    cand := true
+                    cLong := true
+                    cE := e
+                    cSL := sl
+                    cT1 := pmH
+                    cT2 := t2
+                    cQty := q
+                    cQ1 := a
+                    cQ2 := b
+                    cRR := rr
+                    cBrk := useBreak
+                    cTag := "LONG @" + touchTag + " [" + str.trim(cf) + "]"
+                else
+                    skipWhy := "Long setup skipped: " + w
+
+    // ---- C.2 standard short: bounce to resistance + bearish confirmation ----
+    if not cand and bias == "SHORT" and loSince > pmL
+        [lv, tg] = f_resistTouch(high, close, prox, pmL)
+        if not na(lv)
+            touchBar := bar_index
+            touchLvl := lv
+            touchExt := high
+            touchTag := tg
+        if not na(touchLvl) and bar_index - touchBar <= confirmBars
+            float uw  = high - math.max(open, close)
+            bool rev  = rngB > 0 and close < open and close <= high - 0.66 * rngB and uw >= 0.5 * rngB
+            bool lh   = bar_index > touchBar and high < touchExt
+            bool vu   = volume >= confVolMult * avg5
+            bool conf = (useRev and rev) or (useHL and lh) or (useVU and vu)
+            if conf and (not reqDirClose or close < open) and close <= touchLvl + prox
+                float e  = useBreak ? low - tick : close
+                float sl = f_ceilTick(pbHigh + f_buf(e))
+                [t2, t2t] = f_nextBelow(pmL, eps)
+                [ok, q, a, b, rr, w] = f_check(false, e, sl, pmL)
+                string cf = (rev ? "rev " : "") + (lh ? "LH " : "") + (vu ? "vol" : "")
+                if ok
+                    cand := true
+                    cLong := false
+                    cE := e
+                    cSL := sl
+                    cT1 := pmL
+                    cT2 := t2
+                    cQty := q
+                    cQ1 := a
+                    cQ2 := b
+                    cRR := rr
+                    cBrk := useBreak
+                    cTag := "SHORT @" + touchTag + " [" + str.trim(cf) + "]"
+                else
+                    skipWhy := "Short setup skipped: " + w
+
+if canTrade and not cand and skipWhy != ""
+    dayStatus := "ACTIVE — " + skipWhy
+
+if cand
+    f_place(cLong, cE, cSL, cT1, cQty, cQ1, cQ2, cBrk, cTag)
+    state      := cBrk ? 1 : 2
+    if not cBrk
+        tradeCount += 1
+    orderBar   := bar_index
+    entryBar   := bar_index
+    closedBase := strategy.closedtrades
+    netBase    := strategy.netprofit
+    isLongTrd  := cLong
+    entryPx    := cE
+    slPx       := cSL
+    tp1Px      := cT1
+    tp2Px      := cT2
+    entryQty   := cQty
+    q1v        := cQ1
+    q2v        := cQ2
+    tp1Done    := false
+    tp2Active  := false
+    limitsOff  := false
+    runStop    := cSL
+    setupName  := cTag
+    touchLvl   := na
+    touchBar   := na
+    dayStatus  := (cBrk ? "BREAK ORDER " : "IN TRADE ") + cTag + "  R:R " + str.tostring(cRR, "#.##") + "  x" + str.tostring(cQty)
+    alert("NQ PM-Target " + (cBrk ? "break order: " : "entry: ") + cTag + "  entry " + str.tostring(cE, format.mintick) + "  stop " + str.tostring(cSL, format.mintick) + "  TP1 " + str.tostring(cT1, format.mintick) + (na(cT2) ? "" : "  TP2 " + str.tostring(cT2, format.mintick)) + "  qty " + str.tostring(cQty), alert.freq_once_per_bar_close)
+
+// ─────────────────────────────── DRAWING ────────────────────────────────────
+if rthStart and showLevels and array.size(lvP) > 0
+    int x1 = openTs - 30 * 60 * 1000
+    int x2 = openTs + 15 * 60 * 1000
+    for [i, p] in lvP
+        string t = array.get(lvT, i)
+        color c = str.contains(t, "PMH") ? color.lime : str.contains(t, "PML") ? color.red : str.contains(t, "Gap") ? color.orange : color.new(color.green, 30)
+        int w = str.contains(t, "PMH") or str.contains(t, "PML") ? 2 : 1
+        line.new(x1, p, x2, p, xloc = xloc.bar_time, color = c, width = w, style = str.contains(t, "Round") ? line.style_dotted : line.style_solid)
+        label.new(x2, p, t + " " + str.tostring(p, format.mintick), xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = c, size = size.tiny)
+    if not na(gapTop) and gapTop > gapBot
+        box.new(x1, gapTop, x2, gapBot, xloc = xloc.bar_time, bgcolor = color.new(color.orange, 88), border_color = color.new(color.orange, 70))
+
+bool showTrade = state == 2 and strategy.opentrades > 0
+plot(showTrade ? entryPx : na, "Entry", color.gray, 1, plot.style_linebr)
+plot(showTrade ? (tp1Done ? runStop : slPx) : na, "Stop", color.red, 2, plot.style_linebr)
+plot(showTrade and not tp1Done ? tp1Px : na, "TP1", color.lime, 2, plot.style_linebr)
+plot(showTrade and (not tp1Done or tp2Active) ? tp2Px : na, "TP2", color.teal, 1, plot.style_linebr)
+bgcolor(showBg and dayLive and time >= openTs and time_close <= entryEndTs ? color.new(color.blue, 92) : na, title = "Entry window")
+bgcolor(showBg and time >= hardFlatTs and time < f_ts(9, 45, 0) ? color.new(color.gray, 90) : na, title = "ORB zone (strategy void)")
+
+// ─────────────────────────────── STATUS TABLE ───────────────────────────────
+var table tb = table.new(position.top_right, 2, 12, bgcolor = color.new(color.black, 20), border_width = 1)
+f_row(int r, string k, string v, color c) =>
+    table.cell(tb, 0, r, k, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_left)
+
+if showTable and barstate.islast
+    string tfWarn = timeframe.in_seconds() > 60 ? "  ⚠ use 1-min chart" : ""
+    color bc = bias == "LONG" ? color.lime : bias == "SHORT" ? color.red : color.gray
+    f_row(0, "NQ PM-Target", syminfo.ticker + "  " + timeframe.period + tfWarn, color.white)
+    f_row(1, "Date (ET)", str.format_time(time, "yyyy-MM-dd", TZ), color.white)
+    f_row(2, "Bias", bias + (extBias ? " (extended)" : ""), bc)
+    f_row(3, "Status", dayStatus, color.yellow)
+    f_row(4, "PMH / PML", str.tostring(pmH, format.mintick) + " / " + str.tostring(pmL, format.mintick), color.white)
+    f_row(5, "PM range", str.tostring(pmRange, format.mintick) + " pts (" + str.tostring(pmRange / nz(priceNow, close) * 100, "#.###") + "%)", color.white)
+    f_row(6, "Gap", (gapDir > 0 ? "UP " : gapDir < 0 ? "DOWN " : "FLAT ") + str.tostring(gapBot, format.mintick) + " – " + str.tostring(gapTop, format.mintick), color.white)
+    f_row(7, "Momentum 9:15→9:30", pmMom > 0 ? "UP" : pmMom < 0 ? "DOWN" : "FLAT", color.white)
+    f_row(8, "Targets", str.tostring(primaryTgt, format.mintick) + (na(secondTgt) ? "" : " → " + str.tostring(secondTgt, format.mintick)), color.white)
+    f_row(9, "Trades today", str.tostring(tradeCount) + " / " + str.tostring(maxTrades), color.white)
+    f_row(10, "Last trade", lastTrade, color.white)
+    f_row(11, "Hard flat", "09:40:00 ET — NO EXCEPTIONS", color.orange)
