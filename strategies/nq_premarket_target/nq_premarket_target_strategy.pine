@@ -16,7 +16,7 @@
 //  bar (closes 09:39:00); positions still open are flattened on the close of
 //  the 09:39 bar (= 09:40:00). Use a 15s/30s chart for exact 09:39:30/45 timing.
 // ============================================================================
-strategy("NQ Market-Open Pre-Market Target", shorttitle = "NQ PM-Target", overlay = true,
+strategy("NQ Market-Open Pre-Market Target", shorttitle = "NQ PMT", overlay = true,
      initial_capital = 100000, currency = currency.USD,
      default_qty_type = strategy.fixed, default_qty_value = 1,
      pyramiding = 0, process_orders_on_close = true,
@@ -257,6 +257,8 @@ f_resistTouch(float hi, float cl, float prox, float floorPx) =>
                 tag  := array.get(lvT, i)
     [best, tag]
 
+var float dayRiskMult = 1.0   // 0.5 on G.3 conflict days (set at the open)
+
 // ─────────────────────────────── RISK HELPERS ───────────────────────────────
 // returns [ok, qty, q1, q2, rr, why]
 f_check(bool isLong, float e, float sl, float t1) =>
@@ -359,7 +361,6 @@ var int    dTouch   = 0
 var int    dConf    = 0
 var int    dSkip    = 0
 var string dSkipWhy = ""
-var float  dayRiskMult = 1.0
 // backtest-wide diagnostics (why days did / didn't trade)
 var int cDays      = 0
 var int cNoBias    = 0
