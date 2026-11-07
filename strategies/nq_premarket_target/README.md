@@ -33,5 +33,13 @@ If 1% risk buys less than 1 NQ contract, the trade is **skipped** by default. Us
 ## Not automatable in Pine
 Halts and bid/ask spread blowouts (G.1.5–6) can't be detected from chart data, so the trader must enforce them. Scheduled news must be entered by hand.
 
+## Optional switches (spec behaviour is the default)
+- **Stop anchor:** the spec puts the stop beyond the low/high since 09:30. The alternative is the swing at the touched level, which gives a tighter stop when the open spiked first.
+- **Gap vs momentum conflict:** the spec says NO TRADE. The alternative is the G.3 exception: trade at half risk with the bias taken from momentum and PM-range position.
+- **Max stop distance:** the spec's 0.25% was tuned for QQQ. Try 0.35–0.40% on NQ.
+
+## Diagnostics
+Each day is labelled at the open (filtered days) or at 09:40 with the result. The table counts filtered days, skipped setups (contract size, stop, R:R), days with no confirmation and days where price never reached a level, across all loaded history.
+
 ## Deviation from spec
 - **Confirmation candle must close in trade direction** is ON by default. It is an extra safety filter, so a red candle can't "confirm" a long through the volume clause alone. Turn it off for the literal spec.

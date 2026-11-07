@@ -37,7 +37,9 @@ grpRisk = "Risk & sizing"
 riskPct      = input.float(1.0, "Risk per trade (% equity)", minval = 0.1, maxval = 1.0, step = 0.1, group = grpRisk, tooltip = "Spec: 1%, may be reduced to 0.5%, never above 1%.")
 maxContracts = input.int(10, "Max contracts", minval = 1, group = grpRisk, tooltip = "Replaces the equity '2% notional' cap from the QQQ version, which is meaningless for futures (one NQ ≈ $400k+ notional).")
 sizeFallback = input.string("Skip trade", "If 1% risk buys < 1 contract", options = ["Skip trade", "Trade 1 contract"], group = grpRisk, tooltip = "On small accounts switch the chart to MNQ instead of overriding risk.")
-maxStopPct   = input.float(0.25, "Max stop distance (%)", step = 0.01, group = grpRisk)
+maxStopPct   = input.float(0.25, "Max stop distance (%)", step = 0.01, group = grpRisk, tooltip = "Spec 0.25% (tuned for QQQ). NQ's opening bars are wider; 0.35–0.40% is a reasonable NQ test value.")
+stopMode     = input.string("Lowest/highest since open (spec)", "Stop anchor", options = ["Lowest/highest since open (spec)", "Pullback swing at the touched level"], group = grpRisk, tooltip = "Spec: stop beyond the extreme since 09:30. Alternative: stop beyond the swing that formed at the support/resistance level (tighter when the open spiked first).")
+conflictMode = input.string("No trade (spec)", "Gap vs momentum conflict", options = ["No trade (spec)", "Trade at half risk (G.3 exception)"], group = grpRisk, tooltip = "When the gap direction disagrees with 09:15–09:30 momentum. Spec default is NO TRADE; G.3 allows half size. Bias then follows momentum + position in the PM range.")
 minRR        = input.float(1.5, "Min R:R to TP1", step = 0.1, group = grpRisk)
 bufferPct    = input.float(0.02, "Stop buffer (% of price, min 1 tick)", step = 0.01, group = grpRisk)
 maxTrades    = input.int(2, "Max trades per day", minval = 1, maxval = 2, group = grpRisk, tooltip = "2nd trade only after a losing 1st trade.")
@@ -90,6 +92,7 @@ showBg     = input.bool(true, "Shade entry window", group = grpVis)
 showDayLbl = input.bool(true, "Label each day's result on the chart", group = grpVis)
 tblPosStr  = input.string("Top right", "Table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = grpVis)
 showStats  = input.bool(true, "Show backtest diagnostics in table", group = grpVis)
+tblSizeStr = input.string("Tiny", "Table text size", options = ["Tiny", "Small", "Normal"], group = grpVis)
 
 // ─────────────────────────────── TIME HELPERS ───────────────────────────────
 etY    = year(time, TZ)
@@ -280,7 +283,7 @@ f_check(bool isLong, float e, float sl, float t1) =>
             ok  := false
             why := "R:R " + str.tostring(rr, "#.##") + " < " + str.tostring(minRR)
         else
-            qty := int(math.floor(strategy.equity * riskPct / 100 / (risk * syminfo.pointvalue)))
+            qty := int(math.floor(strategy.equity * riskPct * dayRiskMult / 100 / (risk * syminfo.pointvalue)))
             if qty < 1 and sizeFallback == "Trade 1 contract"
                 qty := 1
             qty := math.min(qty, maxContracts)
@@ -356,6 +359,7 @@ var int    dTouch   = 0
 var int    dConf    = 0
 var int    dSkip    = 0
 var string dSkipWhy = ""
+var float  dayRiskMult = 1.0
 // backtest-wide diagnostics (why days did / didn't trade)
 var int cDays      = 0
 var int cNoBias    = 0
@@ -378,6 +382,7 @@ if rthStart
         strategy.cancel("S")
     state      := 0
     tradeCount := 0
+    dayRiskMult := 1.0
     lastWin    := false
     active     := false
     activeKey  := dayKey
@@ -465,6 +470,9 @@ if rthStart
         else if nearL and pmMom < 0
             bias    := "SHORT"
             extBias := true
+        else if conflictMode != "No trade (spec)" and gapDir != 0 and pmMom != 0 and gapDir != pmMom
+            bias        := priceNow >= mid and pmMom > 0 ? "LONG" : priceNow <= mid and pmMom < 0 ? "SHORT" : "NONE"
+            dayRiskMult := bias != "NONE" ? 0.5 : 1.0
 
         // --- no-trade filters (G.1) & checklist (B.5) ---
         bool chop = gapSize > 0 and priceNow >= gapBot + 0.3 * gapSize and priceNow <= gapBot + 0.7 * gapSize and not f_anyWithin(priceNow, keyProxPct / 100 * priceNow)
@@ -495,7 +503,7 @@ if rthStart
 
     if why == ""
         active    := true
-        dayStatus := "ACTIVE — " + bias + (extBias ? " (extended)" : "") + ", watching for setup"
+        dayStatus := "ACTIVE — " + bias + (extBias ? " (extended)" : "") + (dayRiskMult < 1 ? " (conflict: half risk)" : "") + ", watching for setup"
         alert("NQ PM-Target " + todayStr + ": bias " + bias + (extBias ? " (extended)" : "") + "  PMH " + str.tostring(pmH, format.mintick) + "  PML " + str.tostring(pmL, format.mintick), alert.freq_once_per_bar_close)
     else
         bias      := "NONE"
@@ -702,22 +710,28 @@ if canTrade
     // ---- C.1 standard long: pullback to support + bullish confirmation ----
     if not cand and bias == "LONG" and hiSince < pmH
         [lv, tg] = f_supportTouch(low, close, prox, pmH)
+        float prevExt = touchExt
         if not na(lv)
+            if not na(touchLvl) and lv == touchLvl and bar_index - touchBar <= confirmBars
+                touchExt := math.min(touchExt, low)   // same pullback still testing the level
+            else
+                touchExt := low                      // new touch
+                prevExt  := na
+                dTouch   += 1
             touchBar := bar_index
             touchLvl := lv
-            touchExt := low
-            dTouch   += 1
             touchTag := tg
         if not na(touchLvl) and bar_index - touchBar <= confirmBars
             float lw  = math.min(open, close) - low
             bool rev  = rngB > 0 and close > open and close >= low + 0.66 * rngB and lw >= 0.5 * rngB
-            bool hl   = bar_index > touchBar and low > touchExt
+            bool hl   = not na(prevExt) and low > prevExt
             bool vu   = volume >= confVolMult * avg5
             bool conf = (useRev and rev) or (useHL and hl) or (useVU and vu)
             if conf and (not reqDirClose or close > open) and close >= touchLvl - prox
                 dConf += 1
                 float e  = useBreak ? high + tick : close
-                float sl = f_floorTick(pbLow - f_buf(e))
+                float anchorL = stopMode == "Lowest/highest since open (spec)" ? pbLow : math.min(touchExt, low)
+                float sl = f_floorTick(anchorL - f_buf(e))
                 [t2, t2t] = f_nextAbove(pmH, eps)
                 [ok, q, a, b, rr, w] = f_check(true, e, sl, pmH)
                 string cf = (rev ? "rev " : "") + (hl ? "HL " : "") + (vu ? "vol" : "")
@@ -742,22 +756,28 @@ if canTrade
     // ---- C.2 standard short: bounce to resistance + bearish confirmation ----
     if not cand and bias == "SHORT" and loSince > pmL
         [lv, tg] = f_resistTouch(high, close, prox, pmL)
+        float prevExt = touchExt
         if not na(lv)
+            if not na(touchLvl) and lv == touchLvl and bar_index - touchBar <= confirmBars
+                touchExt := math.max(touchExt, high)
+            else
+                touchExt := high
+                prevExt  := na
+                dTouch   += 1
             touchBar := bar_index
             touchLvl := lv
-            touchExt := high
-            dTouch   += 1
             touchTag := tg
         if not na(touchLvl) and bar_index - touchBar <= confirmBars
             float uw  = high - math.max(open, close)
             bool rev  = rngB > 0 and close < open and close <= high - 0.66 * rngB and uw >= 0.5 * rngB
-            bool lh   = bar_index > touchBar and high < touchExt
+            bool lh   = not na(prevExt) and high < prevExt
             bool vu   = volume >= confVolMult * avg5
             bool conf = (useRev and rev) or (useHL and lh) or (useVU and vu)
             if conf and (not reqDirClose or close < open) and close <= touchLvl + prox
                 dConf += 1
                 float e  = useBreak ? low - tick : close
-                float sl = f_ceilTick(pbHigh + f_buf(e))
+                float anchorH = stopMode == "Lowest/highest since open (spec)" ? pbHigh : math.max(touchExt, high)
+                float sl = f_ceilTick(anchorH + f_buf(e))
                 [t2, t2t] = f_nextBelow(pmL, eps)
                 [ok, q, a, b, rr, w] = f_check(false, e, sl, pmL)
                 string cf = (rev ? "rev " : "") + (lh ? "LH " : "") + (vu ? "vol" : "")
@@ -833,9 +853,10 @@ bgcolor(showBg and time >= hardFlatTs and time < f_ts(9, 45, 0) ? color.new(colo
 // ─────────────────────────────── STATUS TABLE ───────────────────────────────
 tblPos = tblPosStr == "Top right" ? position.top_right : tblPosStr == "Bottom right" ? position.bottom_right : tblPosStr == "Top left" ? position.top_left : position.bottom_left
 var table tb = table.new(tblPos, 2, 22, bgcolor = color.new(color.black, 20), border_width = 1)
+tblTxt = tblSizeStr == "Tiny" ? size.tiny : tblSizeStr == "Small" ? size.small : size.normal
 f_row(int r, string k, string v, color c) =>
-    table.cell(tb, 0, r, k, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
-    table.cell(tb, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 0, r, k, text_color = color.silver, text_size = tblTxt, text_halign = text.align_left)
+    table.cell(tb, 1, r, v, text_color = c, text_size = tblTxt, text_halign = text.align_left)
 f_pct(int n) => cDays > 0 ? str.tostring(n) + "  (" + str.tostring(n * 100.0 / cDays, "#") + "%)" : str.tostring(n)
 
 if showTable and barstate.islast
