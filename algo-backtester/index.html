@@ -1,5 +1,15 @@
 <meta charset="utf-8">
 <title>FlowDesk Backtester</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Order-flow charting and strategy backtesting in your browser.">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#151f2b">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FlowDesk">
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -20,6 +30,9 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+html, body { margin: 0; -webkit-text-size-adjust: 100%; }
+:root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+img { max-width: 100%; }
 [hidden] { display: none !important; }
 body { background: var(--ink); color: var(--text); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--panel); }
@@ -249,6 +262,11 @@ a.btn.primary { color: #1a1408; }
 .ocard .go { font-family: var(--font-data); font-size: 12px; color: var(--brass); margin-top: 4px; }
 .tips { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 24px; color: var(--muted); font-size: 14px; margin: 0; padding-left: 18px; }
 
+/* install hint (iPhone / iPad Safari) */
+.ioshint { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: 25; background: var(--panel); border: 1px solid var(--brass); border-radius: 10px; padding: 12px 14px; display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  box-shadow: 0 12px 40px rgba(0,0,0,.5); font-size: 14px; max-width: 520px; margin: 0 auto; }
+.shareglyph { display: inline-block; border: 1px solid var(--muted); border-radius: 4px; padding: 0 4px; font-size: 12px; }
 /* app header user menu */
 .userbox { display: flex; align-items: center; gap: 10px; }
 .avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--brass); color: #1a1408; display: grid; place-items: center; font-family: var(--font-display); font-weight: 600; font-size: 13px; }
@@ -264,6 +282,7 @@ a.btn.primary { color: #1a1408; }
     <div class="links"><a class="l" href="#features" data-scroll="features">Features</a><a class="l" href="#how" data-scroll="how">How it works</a><a class="l" href="#pine" data-scroll="pine">Pine import</a></div>
     <span class="sp"></span>
     <span data-guest><a class="l" href="#login">Log in</a></span>
+    <button class="btn" type="button" data-install hidden>Install app</button>
     <a class="btn primary" href="#signup" data-guest>Get started</a>
     <a class="btn primary" href="#app" data-member hidden>Open the app</a>
   </div></nav>
@@ -431,6 +450,7 @@ close &gt; <span class="f">bbUpper</span>(close, <span class="n">20</span>, <spa
 <header class="top">
   <div class="brand"><b>Flow</b>Desk <small>order-flow backtester · personal</small></div>
   <div class="dataset" id="datasetLabel">loading…</div>
+  <button class="btn" type="button" data-install hidden>Install app</button>
   <div class="userbox" id="userBox"></div>
 </header>
 
@@ -598,6 +618,10 @@ close &gt; <span class="f">bbUpper</span>(close, <span class="n">20</span>, <spa
 </div>
 </div>
 <div id="toasts" aria-live="polite"></div>
+<div id="iosHint" class="ioshint" hidden role="dialog" aria-label="Install FlowDesk">
+  <div><b>Install FlowDesk on your iPhone</b><br>Tap <span class="shareglyph" aria-label="Share">⬆︎</span> <b>Share</b> in Safari, then <b>Add to Home Screen</b>.</div>
+  <button class="btn" type="button" id="iosHintClose">Got it</button>
+</div>
 
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
@@ -1801,4 +1825,32 @@ $("tape").innerHTML = [...tapeItems, ...tapeItems].map((t, i) => `<span><b>${Str
 /* ============================== Start ============================== */
 setUser(SESS.get());
 route();
+</script>
+<script>
+"use strict";
+/* ============================== Installable app (PWA) ============================== */
+(() => {
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  if ("serviceWorker" in navigator && /^https:|^http:\/\/(localhost|127\.0\.0\.1)/.test(location.href)) {
+    navigator.serviceWorker.register("sw.js").then(reg => {
+      reg.addEventListener("updatefound", () => {
+        const nw = reg.installing; if (!nw) return;
+        nw.addEventListener("statechange", () => { if (nw.state === "installed" && navigator.serviceWorker.controller) toast("A new version of FlowDesk is ready. It loads the next time you open the app."); });
+      });
+    }).catch(() => {});
+  }
+  // Chrome / Edge / Android: offer a real install button
+  let deferred = null;
+  const btns = () => document.querySelectorAll("[data-install]");
+  window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferred = e; btns().forEach(b => b.hidden = false); });
+  btns().forEach(b => b.onclick = async () => { if (!deferred) return; deferred.prompt(); const { outcome } = await deferred.userChoice; deferred = null; btns().forEach(x => x.hidden = true); if (outcome === "accepted") toast("FlowDesk is installed. Open it from your home screen or app list."); });
+  window.addEventListener("appinstalled", () => btns().forEach(b => b.hidden = true));
+  // iPhone / iPad Safari has no install prompt: show a one-time hint
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  let dismissed = false; try { dismissed = localStorage.getItem("fd_ioshint") === "1"; } catch {}
+  if (ios && !standalone && !dismissed && /^https:/.test(location.href) && !/claude\.ai|claudeusercontent/.test(location.hostname)) setTimeout(() => $("iosHint").hidden = false, 2500);
+  $("iosHintClose").onclick = () => { $("iosHint").hidden = true; try { localStorage.setItem("fd_ioshint", "1"); } catch {} };
+  // When opened as an installed app, skip the marketing page
+  if (standalone && (!location.hash || location.hash === "#welcome") && window.FD_USER) location.hash = "#app";
+})();
 </script>

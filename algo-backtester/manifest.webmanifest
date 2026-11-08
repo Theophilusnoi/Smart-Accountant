@@ -1,0 +1,21 @@
+{
+  "name": "FlowDesk Backtester",
+  "short_name": "FlowDesk",
+  "description": "Order-flow charting and strategy backtesting: flow-coloured bars, delta, custom rules, Pine Script import, optimizer, replay and alerts.",
+  "id": "./",
+  "start_url": "./#app",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f1620",
+  "theme_color": "#151f2b",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Open the backtester", "url": "./#app", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
