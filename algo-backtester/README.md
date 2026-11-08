@@ -21,6 +21,9 @@ Open `index.html` in any modern browser. No install, no server, no account.
 - **Optimizer**: two-parameter grid search with in-sample / out-of-sample split and heatmap.
 - **Replay & alerts**: step through history bar by bar; live watch polls Binance every 30 s and alerts with sound,
   toast and browser notification when the setup fires on a closed bar.
+- **Custom rules**: backtest your own strategy by typing formulas (Pine-Script-like, no coding needed), e.g.
+  `crossUp(ema(close, p1), ema(close, p2)) and rsi(close, 14) < 70` or `close > vwap and deltaPct > 30`.
+  `x[1]` means one bar ago; `p1`–`p3` are tunable numbers the optimizer can search. See the in-app cheat sheet.
 - Presets and last settings are saved in your browser.
 
 Backtest results are hypothetical and are not a guarantee of future performance.

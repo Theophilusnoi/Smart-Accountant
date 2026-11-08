@@ -19,6 +19,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { background: var(--ink); color: var(--text); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--panel); }
 button, input, select { font: inherit; color: inherit; }
@@ -53,7 +54,7 @@ details.box > summary::-webkit-details-marker { display: none; }
 .box-body { padding: 0 12px 12px; display: grid; gap: 10px; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 label.f { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
-label.f input, label.f select {
+label.f input, label.f select, label.f textarea {
   background: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font-family: var(--font-data); font-size: 13px; width: 100%; min-width: 0;
 }
 .chk { display: flex; align-items: center; gap: 8px; font-size: 13px; }
@@ -70,6 +71,12 @@ label.f input, label.f select {
 .seg { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
 .seg button { flex: 1; background: transparent; border: 0; padding: 6px 4px; font-size: 12px; cursor: pointer; color: var(--muted); }
 .seg button[aria-pressed="true"] { background: var(--line); color: var(--text); }
+.wide { grid-column: 1 / -1; }
+label.f textarea { resize: vertical; line-height: 1.4; }
+details.cheat { font-size: 12px; color: var(--muted); border: 1px dashed var(--line); border-radius: 4px; padding: 6px 8px; }
+details.cheat summary { cursor: pointer; color: var(--text); }
+details.cheat p { margin: 6px 0; }
+details.cheat b { color: var(--text); font-weight: 500; }
 .strat-desc { font-size: 12px; color: var(--muted); margin: 0; border-left: 2px solid var(--line); padding-left: 8px; }
 
 main.stage { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
@@ -344,6 +351,164 @@ function flowState(b, f, i, th = 0.25) {
   return 0;
 }
 
+/* ============================== Custom rule language ==============================
+   A small, safe formula language (no eval). Series such as close or ema(close, 20) are whole price
+   histories; x[1] means "x one bar ago". Comparisons and and/or/not are checked on the current bar. */
+const RULE = (() => {
+  const SERIES = ["open", "high", "low", "close", "volume", "buyVolume", "sellVolume", "delta", "deltaPct", "cumDelta", "vwap", "hl2", "hlc3", "range", "hour", "dayofweek"];
+  const FUNCS = { ema: [2, 2], sma: [2, 2], rsi: [2, 2], atr: [1, 1], highest: [2, 2], lowest: [2, 2], stdev: [2, 2], change: [1, 2],
+    abs: [1, 1], min: [2, 2], max: [2, 2], crossUp: [2, 2], crossDown: [2, 2], rising: [1, 2], falling: [1, 2] };
+  const DYNAMIC = new Set(["crossUp", "crossDown", "rising", "falling"]);
+  const CMP = new Set(["<", "<=", ">", ">=", "==", "!="]), LOGIC = new Set(["and", "or"]);
+
+  function tokenize(src) {
+    const out = [], re = /\s*(?:(\d+(?:\.\d+)?|\.\d+)|([A-Za-z_]\w*)|(>=|<=|==|!=|&&|\|\||[-+*/%<>()[\],!]))/y;
+    let m, pos = 0;
+    while (pos < src.length) {
+      if (/^\s*$/.test(src.slice(pos))) break;
+      re.lastIndex = pos; m = re.exec(src);
+      if (!m) throw new Error(`I don't understand "${src.slice(pos).trim().slice(0, 12)}"`);
+      pos = re.lastIndex;
+      if (m[1]) out.push({ t: "num", v: +m[1] });
+      else if (m[2]) { const w = m[2]; out.push(w === "and" || w === "or" || w === "not" ? { t: "op", v: w } : { t: "id", v: w }); }
+      else out.push({ t: "op", v: m[3] === "&&" ? "and" : m[3] === "||" ? "or" : m[3] === "!" ? "not" : m[3] });
+    }
+    return out;
+  }
+  function parse(src, params) {
+    const tk = tokenize(src); let p = 0;
+    const peek = () => tk[p], isOp = v => tk[p] && tk[p].t === "op" && tk[p].v === v;
+    const expect = v => { if (!isOp(v)) throw new Error(`Expected "${v}"${tk[p] ? ` before "${tk[p].v}"` : " at the end"}`); p++; };
+    const bin = (next, ops) => () => { let a = next(); while (tk[p] && tk[p].t === "op" && ops.includes(tk[p].v)) { const op = tk[p++].v; a = { t: "bin", op, a, b: next() }; } return a; };
+    const unary = () => {
+      if (isOp("not")) { p++; return { t: "un", op: "not", a: unary() }; }
+      if (isOp("-")) { p++; return { t: "un", op: "-", a: unary() }; }
+      if (isOp("+")) { p++; return unary(); }
+      return postfix();
+    };
+    const mul = bin(unary, ["*", "/", "%"]), add = bin(mul, ["+", "-"]), cmp = bin(add, [...CMP]), and = bin(cmp, ["and"]), or = bin(and, ["or"]);
+    function primary() {
+      const t = peek(); if (!t) throw new Error("The rule ends too early");
+      if (t.t === "num") { p++; return { t: "num", v: t.v }; }
+      if (isOp("(")) { p++; const e = or(); expect(")"); return e; }
+      if (t.t === "id") {
+        p++;
+        if (isOp("(")) {
+          p++; const args = []; if (!isOp(")")) { args.push(or()); while (isOp(",")) { p++; args.push(or()); } } expect(")");
+          const f = FUNCS[t.v]; if (!f) throw new Error(`Unknown function "${t.v}". See the cheat sheet for the list.`);
+          if (args.length < f[0] || args.length > f[1]) throw new Error(`${t.v}() takes ${f[0] === f[1] ? f[0] : f[0] + " or " + f[1]} values, got ${args.length}`);
+          return { t: "call", name: t.v, args };
+        }
+        if (SERIES.includes(t.v)) return { t: "ser", name: t.v };
+        if (t.v in params) return { t: "num", v: params[t.v] };
+        if (t.v === "true" || t.v === "false") return { t: "num", v: t.v === "true" ? 1 : 0 };
+        throw new Error(`Unknown name "${t.v}". Names are case-sensitive, e.g. deltaPct, cumDelta.`);
+      }
+      throw new Error(`Unexpected "${t.v}"`);
+    }
+    function postfix() { let e = primary(); while (isOp("[")) { p++; const k = or(); expect("]"); e = { t: "idx", a: e, k }; } return e; }
+    const root = or(); if (p < tk.length) throw new Error(`Unexpected "${tk[p].v}"`);
+    (function mark(n) { // static = same answer for every bar, so its series can be computed once
+      const kids = n.t === "bin" ? [n.a, n.b] : n.t === "un" ? [n.a] : n.t === "idx" ? [n.a, n.k] : n.t === "call" ? n.args : [];
+      kids.forEach(mark);
+      n.static = kids.every(k => k.static) && !(n.t === "bin" && (CMP.has(n.op) || LOGIC.has(n.op))) && !(n.t === "un" && n.op === "not") && !(n.t === "call" && DYNAMIC.has(n.name));
+    })(root);
+    return root;
+  }
+
+  const isArr = Array.isArray, at = (x, i) => isArr(x) ? x[i] : x, truthy = x => x !== 0 && x === x && x !== false;
+  const asArr = (x, n) => isArr(x) ? x : new Array(n).fill(x);
+  const shift = (a, k) => a.map((_, i) => i >= k ? a[i - k] : NaN);
+  const stdev = (a, n) => { const m = IND.sma(a, n); return a.map((_, i) => { if (i < n - 1) return NaN; let s = 0; for (let j = i - n + 1; j <= i; j++) s += (a[j] - m[i]) ** 2; return Math.sqrt(s / n); }); };
+
+  function context(b) {
+    const ser = {}, n = b.length;
+    const get = name => {
+      if (ser[name]) return ser[name];
+      const f = (name === "delta" || name === "deltaPct" || name === "cumDelta") ? flowFeatures(b) : null;
+      const map = { open: x => x.o, high: x => x.h, low: x => x.l, close: x => x.c, volume: x => x.v, buyVolume: x => x.bv, sellVolume: x => x.v - x.bv,
+        hl2: x => (x.h + x.l) / 2, hlc3: x => (x.h + x.l + x.c) / 3, range: x => x.h - x.l, hour: x => new Date(x.t * 1000).getUTCHours(), dayofweek: x => new Date(x.t * 1000).getUTCDay() };
+      ser[name] = name === "delta" ? f.delta : name === "deltaPct" ? f.dpct.map(v => v * 100) : name === "cumDelta" ? f.cum : name === "vwap" ? IND.vwap(b) : b.map(map[name]);
+      return ser[name];
+    };
+    return { b, n, get, cache: new Map() };
+  }
+  function evaluate(node, ctx, i) {
+    if (node.static && ctx.cache.has(node)) return ctx.cache.get(node);
+    const r = ev(node, ctx, i);
+    if (node.static && isArr(r)) ctx.cache.set(node, r);
+    return r;
+  }
+  function ev(n, ctx, i) {
+    const E = x => evaluate(x, ctx, i), N = ctx.n;
+    switch (n.t) {
+      case "num": return n.v;
+      case "ser": return ctx.get(n.name);
+      case "idx": { const a = E(n.a), k = E(n.k); if (isArr(k)) throw new Error("The number inside [ ] must be a plain number, like close[1]"); return isArr(a) ? shift(a, Math.max(0, Math.round(k))) : a; }
+      case "un": { const a = E(n.a); if (n.op === "not") return truthy(at(a, i)) ? 0 : 1; return isArr(a) ? a.map(v => -v) : -a; }
+      case "bin": {
+        if (n.op === "and") return truthy(at(E(n.a), i)) && truthy(at(E(n.b), i)) ? 1 : 0;
+        if (n.op === "or") return truthy(at(E(n.a), i)) || truthy(at(E(n.b), i)) ? 1 : 0;
+        const a = E(n.a), b = E(n.b);
+        if (CMP.has(n.op)) { const x = at(a, i), y = at(b, i); if (x !== x || y !== y) return 0;
+          return (n.op === "<" ? x < y : n.op === "<=" ? x <= y : n.op === ">" ? x > y : n.op === ">=" ? x >= y : n.op === "==" ? x === y : x !== y) ? 1 : 0; }
+        const f = n.op === "+" ? (x, y) => x + y : n.op === "-" ? (x, y) => x - y : n.op === "*" ? (x, y) => x * y : n.op === "/" ? (x, y) => x / y : (x, y) => x % y;
+        if (!isArr(a) && !isArr(b)) return f(a, b);
+        const A = asArr(a, N), B = asArr(b, N); return A.map((v, j) => f(v, B[j]));
+      }
+      case "call": {
+        const args = n.args.map(E), [a, b] = args, num = x => { if (isArr(x)) throw new Error(`The length in ${n.name}() must be a number`); return Math.max(1, Math.round(x)); };
+        switch (n.name) {
+          case "ema": return IND.ema(asArr(a, N), num(b));
+          case "sma": return IND.sma(asArr(a, N), num(b));
+          case "rsi": return IND.rsi(asArr(a, N), num(b));
+          case "atr": return IND.atr(ctx.b, num(a));
+          case "highest": return IND.highest(asArr(a, N), num(b));
+          case "lowest": return IND.lowest(asArr(a, N), num(b));
+          case "stdev": return stdev(asArr(a, N), num(b));
+          case "change": { const A = asArr(a, N), k = b == null ? 1 : num(b); return A.map((v, j) => j >= k ? v - A[j - k] : NaN); }
+          case "abs": return isArr(a) ? a.map(Math.abs) : Math.abs(a);
+          case "min": case "max": { const f = Math[n.name]; if (!isArr(a) && !isArr(b)) return f(a, b); const A = asArr(a, N), B = asArr(b, N); return A.map((v, j) => f(v, B[j])); }
+          case "crossUp": case "crossDown": {
+            if (i < 1) return 0; const x0 = at(a, i - 1), x1 = at(a, i), y0 = at(b, i - 1), y1 = at(b, i);
+            if ([x0, x1, y0, y1].some(v => v !== v)) return 0;
+            return (n.name === "crossUp" ? x0 <= y0 && x1 > y1 : x0 >= y0 && x1 < y1) ? 1 : 0;
+          }
+          case "rising": case "falling": { const k = b == null ? 1 : num(b); if (i < k) return 0; const x = at(a, i), y = at(a, i - k); return (n.name === "rising" ? x > y : x < y) ? 1 : 0; }
+        }
+      }
+    }
+    throw new Error("Unsupported expression");
+  }
+  return {
+    compile(src, params) { const s = (src || "").trim(); return s ? parse(s, params) : null; },
+    test(node, ctx, i) { return node ? truthy(at(evaluate(node, ctx, i), i)) : false; },
+    series(node, ctx) { const r = evaluate(node, ctx, ctx.n - 1); return asArr(r, ctx.n); },
+    context,
+  };
+})();
+
+const RULE_FIELDS = [
+  { k: "longEntry", l: "Buy (go long) when" }, { k: "shortEntry", l: "Sell (go short) when" },
+  { k: "exitLong", l: "Close long when (optional)" }, { k: "exitShort", l: "Close short when (optional)" },
+  { k: "plot", l: "Draw on chart (optional, separate with ;)" },
+];
+const RULE_EXAMPLES = {
+  "EMA cross with RSI filter": { p1: 9, p2: 21, p3: 14, longEntry: "crossUp(ema(close, p1), ema(close, p2)) and rsi(close, p3) < 70", shortEntry: "crossDown(ema(close, p1), ema(close, p2)) and rsi(close, p3) > 30", exitLong: "", exitShort: "", plot: "ema(close, p1); ema(close, p2)" },
+  "Delta surge with VWAP": { p1: 30, p2: 1.5, p3: 20, longEntry: "close > vwap and deltaPct > p1 and volume > p2 * sma(volume, p3)", shortEntry: "close < vwap and deltaPct < -p1 and volume > p2 * sma(volume, p3)", exitLong: "crossDown(close, vwap)", exitShort: "crossUp(close, vwap)", plot: "vwap" },
+  "Inside-bar breakout": { p1: 0, p2: 0, p3: 0, longEntry: "high[1] < high[2] and low[1] > low[2] and close > high[1]", shortEntry: "high[1] < high[2] and low[1] > low[2] and close < low[1]", exitLong: "", exitShort: "", plot: "" },
+  "Session breakout (UTC hours)": { p1: 13, p2: 20, p3: 12, longEntry: "hour >= p1 and hour < p2 and close > highest(high, p3)[1]", shortEntry: "hour >= p1 and hour < p2 and close < lowest(low, p3)[1]", exitLong: "hour >= p2", exitShort: "hour >= p2", plot: "highest(high, p3)[1]; lowest(low, p3)[1]" },
+  "Bollinger band reversion": { p1: 20, p2: 2, p3: 0, longEntry: "crossUp(close, sma(close, p1) - p2 * stdev(close, p1))", shortEntry: "crossDown(close, sma(close, p1) + p2 * stdev(close, p1))", exitLong: "crossUp(close, sma(close, p1))", exitShort: "crossDown(close, sma(close, p1))", plot: "sma(close, p1) + p2 * stdev(close, p1); sma(close, p1); sma(close, p1) - p2 * stdev(close, p1)" },
+};
+const RULE_CHEAT = `
+<p><b>Price data</b> (whole history): open, high, low, close, volume, hl2, hlc3, range, vwap, hour (UTC 0–23), dayofweek (0 = Sunday)</p>
+<p><b>Order flow</b>: buyVolume, sellVolume, delta (buy − sell volume), deltaPct (delta as % of volume, −100 to 100), cumDelta</p>
+<p><b>Bars ago</b>: close[1] = previous close, high[2] = high two bars ago, ema(close, 20)[1] = last bar's EMA</p>
+<p><b>Indicators</b>: ema(src, n), sma(src, n), rsi(src, n), atr(n), highest(src, n), lowest(src, n), stdev(src, n), change(src, n), abs(x), min(a, b), max(a, b)</p>
+<p><b>Conditions</b>: crossUp(a, b), crossDown(a, b), rising(src, n), falling(src, n), &lt; &lt;= &gt; &gt;= == !=, and, or, not, ( )</p>
+<p><b>Your numbers</b>: p1, p2, p3 come from the boxes above, so the optimizer can tune them.</p>
+<p>Rules are checked when each bar closes; trades fill at the next bar's open. Stops and targets come from the Risk panel.</p>`;
+
 /* ============================== Strategies ==============================
    Each returns { sig, exit, overlays }. sig[i] = +1 / -1 entry on close of bar i.
    exit[i] = +1 closes longs, -1 closes shorts, 2 closes either.               */
@@ -448,6 +613,40 @@ const STRATS = {
       const sig = b.map(() => 0), exit = b.map(() => 0);
       for (let i = 1; i < b.length; i++) { if (c[i] > up[i]) sig[i] = 1; else if (c[i] < dn[i]) sig[i] = -1; if (c[i] < xd[i]) exit[i] = 1; if (c[i] > xu[i]) exit[i] = -1; }
       return { sig, exit, overlays: [{ name: "High " + p.len, data: up, color: "#3fb6a0" }, { name: "Low " + p.len, data: dn, color: "#e0665a" }] };
+    },
+  },
+  custom: {
+    name: "Custom rules (your own strategy)",
+    desc: "Write your own entry and exit conditions as formulas. Pick an example to start from, then edit it.",
+    custom: true,
+    params: [
+      { k: "p1", l: "p1", d: 9, min: 0, max: 1e9, s: "any" },
+      { k: "p2", l: "p2", d: 21, min: 0, max: 1e9, s: "any" },
+      { k: "p3", l: "p3", d: 14, min: 0, max: 1e9, s: "any" },
+    ],
+    run(b, p) {
+      const sig = b.map(() => 0), exit = b.map(() => 0), overlays = [];
+      const nums = { p1: p.p1, p2: p.p2, p3: p.p3 };
+      let field = "";
+      try {
+        const R = {}; for (const f of RULE_FIELDS.slice(0, 4)) { field = f.l; R[f.k] = RULE.compile(p[f.k], nums); }
+        const ctx = RULE.context(b); let nl = 0, ns = 0;
+        for (let i = 1; i < b.length; i++) {
+          field = "Buy rule"; const L = RULE.test(R.longEntry, ctx, i);
+          field = "Sell rule"; const S = RULE.test(R.shortEntry, ctx, i);
+          if (L && !S) { sig[i] = 1; nl++; } else if (S && !L) { sig[i] = -1; ns++; }
+          field = "Close-long rule"; const xl = RULE.test(R.exitLong, ctx, i);
+          field = "Close-short rule"; const xs = RULE.test(R.exitShort, ctx, i);
+          exit[i] = xl && xs ? 2 : xl ? 1 : xs ? -1 : 0;
+        }
+        field = "Draw on chart";
+        const colors = ["#e0a943", "#9aa9ff", "#c58af0", "#3fb6a0"];
+        String(p.plot || "").split(";").map(x => x.trim()).filter(Boolean).forEach((src, k) => overlays.push({ name: src.length > 28 ? src.slice(0, 26) + "…" : src, data: RULE.series(RULE.compile(src, nums), ctx), color: colors[k % 4] }));
+        ruleStatus("", `Rules fired ${nl} buy and ${ns} sell signals on ${b.length.toLocaleString()} bars.` + (!R.longEntry && !R.shortEntry ? " Write a buy or sell rule to get trades." : ""));
+      } catch (e) {
+        ruleStatus(`${field}: ${e.message}`, ""); sig.fill(0); exit.fill(0);
+      }
+      return { sig, exit, overlays };
     },
   },
   vwap_revert: {
@@ -630,9 +829,21 @@ const cls = x => x > 0 ? "pos" : x < 0 ? "neg" : "";
 
 /* strategy controls */
 for (const [k, s] of Object.entries(STRATS)) $("stratSel").add(new Option(s.name, k));
+const escHtml = x => String(x).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function ruleStatus(err, info) { const e = $("ruleErr"), n = $("ruleInfo"); if (!e) return; e.textContent = err; e.hidden = !err; n.textContent = info; }
 function renderParams(vals) {
   const s = STRATS[$("stratSel").value]; $("stratDesc").textContent = s.desc;
-  $("stratParams").innerHTML = s.params.map(p => `<label class="f">${p.l}<input id="p_${p.k}" type="number" value="${vals?.[p.k] ?? p.d}" min="${p.min}" max="${p.max}" step="${p.s}"></label>`).join("");
+  const ex = Object.values(RULE_EXAMPLES)[0];
+  let html = s.params.map(p => `<label class="f">${p.l}<input id="p_${p.k}" type="number" value="${vals?.[p.k] ?? (s.custom ? ex[p.k] : p.d)}" min="${p.min}" max="${p.max}" step="${p.s}"></label>`).join("");
+  if (s.custom) {
+    html += `<label class="f wide">Start from an example<select id="exSel"><option value="">Choose…</option>${Object.keys(RULE_EXAMPLES).map(k => `<option>${k}</option>`).join("")}</select></label>` +
+      RULE_FIELDS.map(f => `<label class="f wide">${f.l}<textarea id="r_${f.k}" rows="${f.k === "plot" ? 2 : 3}" spellcheck="false" autocapitalize="off" autocomplete="off">${escHtml(vals?.[f.k] ?? ex[f.k])}</textarea></label>`).join("") +
+      `<p class="err wide" id="ruleErr" hidden></p><p class="hint wide" id="ruleInfo"></p>
+       <details class="cheat wide"><summary>Formula cheat sheet</summary>${RULE_CHEAT}</details>`;
+  }
+  $("stratParams").innerHTML = html;
+  if (s.custom) $("exSel").onchange = () => { const e = RULE_EXAMPLES[$("exSel").value]; if (!e) return;
+    for (const k of ["p1", "p2", "p3"]) $("p_" + k).value = e[k]; for (const f of RULE_FIELDS) $("r_" + f.k).value = e[f.k]; runAll(); fillOptRange(); };
   const ox = $("optX"), oy = $("optY"); ox.innerHTML = oy.innerHTML = "";
   s.params.forEach(p => { ox.add(new Option(p.l, p.k)); oy.add(new Option(p.l, p.k)); });
   oy.add(new Option("Stop (× ATR)", "_stopAtr")); oy.add(new Option("Target (R)", "_tpR")); ox.add(new Option("Stop (× ATR)", "_stopAtr")); ox.add(new Option("Target (R)", "_tpR"));
@@ -641,16 +852,24 @@ function renderParams(vals) {
 function paramDef(key) { if (key === "_stopAtr") return { d: 2, min: 0.5, max: 4, s: 0.5 }; if (key === "_tpR") return { d: 2, min: 0.5, max: 4, s: 0.5 }; return STRATS[$("stratSel").value].params.find(p => p.k === key); }
 function fillOptRange() {
   for (const ax of ["X", "Y"]) {
-    const p = paramDef($("opt" + ax).value); if (!p) continue;
-    const span = p.max - p.min, lo = Math.max(p.min, p.d - span * 0.25), hi = Math.min(p.max, p.d + span * 0.25);
-    const step = p.s >= 1 ? Math.max(1, Math.round((hi - lo) / 8)) : +((hi - lo) / 8).toFixed(2) || p.s;
-    $("opt" + ax + "min").value = +lo.toFixed(2); $("opt" + ax + "max").value = +hi.toFixed(2); $("opt" + ax + "step").value = step;
+    const key = $("opt" + ax).value, p = paramDef(key); if (!p) continue;
+    const inp = key === "_stopAtr" ? $("stopAtr") : key === "_tpR" ? $("tpR") : $("p_" + key);
+    let cur = parseFloat(inp?.value); if (isNaN(cur)) cur = p.d;
+    const intLike = Number.isInteger(cur) && cur >= 4 && (p.s === "any" || p.s >= 1);
+    let lo = Math.max(p.min, cur * 0.5), hi = Math.min(p.max, cur === 0 ? 1 : cur * 1.5);
+    if (intLike) { lo = Math.round(lo); hi = Math.round(hi); }
+    const step = intLike ? Math.max(1, Math.round((hi - lo) / 8)) : +((hi - lo) / 8).toPrecision(2) || 0.1;
+    $("opt" + ax + "min").value = +lo.toFixed(4); $("opt" + ax + "max").value = +hi.toFixed(4); $("opt" + ax + "step").value = step;
   }
 }
 $("stratSel").onchange = () => { renderParams(); runAll(); };
 $("optX").onchange = $("optY").onchange = fillOptRange;
 
-function readParams() { const s = STRATS[$("stratSel").value], o = {}; s.params.forEach(p => { const v = parseFloat($("p_" + p.k).value); o[p.k] = isNaN(v) ? p.d : v; }); return o; }
+function readParams() {
+  const s = STRATS[$("stratSel").value], o = {}; s.params.forEach(p => { const v = parseFloat($("p_" + p.k).value); o[p.k] = isNaN(v) ? p.d : v; });
+  if (s.custom) for (const f of RULE_FIELDS) o[f.k] = $("r_" + f.k).value;
+  return o;
+}
 function readRisk() {
   const g = (id, d) => { const v = parseFloat($(id).value); return isNaN(v) ? d : v; };
   return { capital: g("capital", 10000), riskPct: g("riskPct", 1), stopAtr: g("stopAtr", 2), tpR: g("tpR", 2), atrLen: Math.max(2, Math.round(g("atrLen", 14))),
@@ -782,7 +1001,7 @@ function runAll() {
 }
 $("runBtn").onclick = runAll;
 $("flowBars").onchange = () => st.result && drawPrice(st.replayEnd ?? st.bars.length);
-document.querySelector(".rail").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.tagName === "INPUT") runAll(); });
+document.querySelector(".rail").addEventListener("keydown", e => { if (e.key === "Enter" && (e.target.tagName === "INPUT" || (e.target.tagName === "TEXTAREA" && (e.ctrlKey || e.metaKey)))) { e.preventDefault(); runAll(); } });
 
 /* data source */
 document.querySelectorAll("[data-src]").forEach(btn => btn.onclick = () => {
