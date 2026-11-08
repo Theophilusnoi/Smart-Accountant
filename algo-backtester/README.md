@@ -23,11 +23,11 @@ Open `index.html` in any modern browser. No install, no server, no account.
   toast and browser notification when the setup fires on a closed bar.
 - **Custom rules**: backtest your own strategy by typing formulas (Pine-Script-like, no coding needed), e.g.
   `crossUp(ema(close, p1), ema(close, p2)) and rsi(close, 14) < 70` or `close > vwap and deltaPct > 30`.
-  `x[1]` means one bar ago; `p1`–`p3` are tunable numbers the optimizer can search. See the in-app cheat sheet.
+  `x[1]` means one bar ago; `p1`–`p3` are tunable numbers the optimizer can search. Includes `macd/macdSignal/macdHist(src, fast, slow, signal)` and `bbUpper/bbMiddle/bbLower(src, n, mult)`, computed the same way as TradingView. See the in-app cheat sheet.
 - **Pine Script import**: paste a TradingView strategy and it is converted into custom rules. Supports inputs (first three
   become p1–p3), variables, `if / else if / else`, `strategy.entry / close / close_all`, `when=`, `plot()`, and common `ta.*` / `math.*`
-  functions. Anything it can't convert is listed. Not supported: `strategy.exit` levels (use the Risk panel), `var`/`:=` state,
-  custom functions, tuples (`ta.macd`, `ta.bb`), `request.security`, arrays and loops.
+  functions, plus `[macd, signal, hist] = ta.macd(...)` and `[middle, upper, lower] = ta.bb(...)`. Anything it can't convert is listed. Not supported: `strategy.exit` levels (use the Risk panel), `var`/`:=` state,
+  custom functions, other multi-value functions (`ta.kc`, `ta.dmi`, `ta.supertrend`), `request.security`, arrays and loops.
 - Presets and last settings are saved in your browser.
 
 Backtest results are hypothetical and are not a guarantee of future performance.

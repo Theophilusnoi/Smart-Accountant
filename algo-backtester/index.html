@@ -359,7 +359,8 @@ function flowState(b, f, i, th = 0.25) {
 const RULE = (() => {
   const SERIES = ["open", "high", "low", "close", "volume", "buyVolume", "sellVolume", "delta", "deltaPct", "cumDelta", "vwap", "hl2", "hlc3", "range", "hour", "dayofweek"];
   const FUNCS = { ema: [2, 2], sma: [2, 2], rsi: [2, 2], atr: [1, 1], highest: [2, 2], lowest: [2, 2], stdev: [2, 2], change: [1, 2],
-    abs: [1, 1], min: [2, 2], max: [2, 2], crossUp: [2, 2], crossDown: [2, 2], rising: [1, 2], falling: [1, 2] };
+    abs: [1, 1], min: [2, 2], max: [2, 2], crossUp: [2, 2], crossDown: [2, 2], rising: [1, 2], falling: [1, 2],
+    macd: [1, 4], macdSignal: [1, 4], macdHist: [1, 4], bbUpper: [1, 3], bbMiddle: [1, 2], bbLower: [1, 3] };
   const DYNAMIC = new Set(["crossUp", "crossDown", "rising", "falling"]);
   const CMP = new Set(["<", "<=", ">", ">=", "==", "!="]), LOGIC = new Set(["and", "or"]);
 
@@ -421,6 +422,10 @@ const RULE = (() => {
   const isArr = Array.isArray, at = (x, i) => isArr(x) ? x[i] : x, truthy = x => x !== 0 && x === x && x !== false;
   const asArr = (x, n) => isArr(x) ? x : new Array(n).fill(x);
   const shift = (a, k) => a.map((_, i) => i >= k ? a[i - k] : NaN);
+  /* EMA that skips leading gaps and seeds with an SMA, as TradingView does (needed for the MACD signal line). */
+  const emaGap = (a, n) => { const o = new Array(a.length).fill(NaN), k = 2 / (n + 1); let e = NaN, cnt = 0, sum = 0;
+    for (let i = 0; i < a.length; i++) { const v = a[i]; if (v !== v) { if (cnt) o[i] = NaN; continue; } cnt++;
+      if (cnt < n) sum += v; else if (cnt === n) { sum += v; e = sum / n; o[i] = e; } else { e = v * k + e * (1 - k); o[i] = e; } } return o; };
   const stdev = (a, n) => { const m = IND.sma(a, n); return a.map((_, i) => { if (i < n - 1) return NaN; let s = 0; for (let j = i - n + 1; j <= i; j++) s += (a[j] - m[i]) ** 2; return Math.sqrt(s / n); }); };
 
   function context(b) {
@@ -468,6 +473,18 @@ const RULE = (() => {
           case "highest": return IND.highest(asArr(a, N), num(b));
           case "lowest": return IND.lowest(asArr(a, N), num(b));
           case "stdev": return stdev(asArr(a, N), num(b));
+          case "macd": case "macdSignal": case "macdHist": {
+            const A = asArr(a, N), f = args[1] == null ? 12 : num(args[1]), sl = args[2] == null ? 26 : num(args[2]), sg = args[3] == null ? 9 : num(args[3]);
+            const ef = emaGap(A, f), es = emaGap(A, sl), line = ef.map((v, j) => v - es[j]);
+            if (n.name === "macd") return line; const sig = emaGap(line, sg);
+            return n.name === "macdSignal" ? sig : line.map((v, j) => v - sig[j]);
+          }
+          case "bbMiddle": return IND.sma(asArr(a, N), b == null ? 20 : num(b));
+          case "bbUpper": case "bbLower": {
+            const A = asArr(a, N), len = b == null ? 20 : num(b), k = args[2] == null ? 2 : args[2];
+            if (isArr(k)) throw new Error(`The multiplier in ${n.name}() must be a number`);
+            const m = IND.sma(A, len), sd = stdev(A, len), dir = n.name === "bbUpper" ? 1 : -1; return m.map((v, j) => v + dir * k * sd[j]);
+          }
           case "change": { const A = asArr(a, N), k = b == null ? 1 : num(b); return A.map((v, j) => j >= k ? v - A[j - k] : NaN); }
           case "abs": return isArr(a) ? a.map(Math.abs) : Math.abs(a);
           case "min": case "max": { const f = Math[n.name]; if (!isArr(a) && !isArr(b)) return f(a, b); const A = asArr(a, N), B = asArr(b, N); return A.map((v, j) => f(v, B[j])); }
@@ -500,13 +517,15 @@ const RULE_EXAMPLES = {
   "Delta surge with VWAP": { p1: 30, p2: 1.5, p3: 20, longEntry: "close > vwap and deltaPct > p1 and volume > p2 * sma(volume, p3)", shortEntry: "close < vwap and deltaPct < -p1 and volume > p2 * sma(volume, p3)", exitLong: "crossDown(close, vwap)", exitShort: "crossUp(close, vwap)", plot: "vwap" },
   "Inside-bar breakout": { p1: 0, p2: 0, p3: 0, longEntry: "high[1] < high[2] and low[1] > low[2] and close > high[1]", shortEntry: "high[1] < high[2] and low[1] > low[2] and close < low[1]", exitLong: "", exitShort: "", plot: "" },
   "Session breakout (UTC hours)": { p1: 13, p2: 20, p3: 12, longEntry: "hour >= p1 and hour < p2 and close > highest(high, p3)[1]", shortEntry: "hour >= p1 and hour < p2 and close < lowest(low, p3)[1]", exitLong: "hour >= p2", exitShort: "hour >= p2", plot: "highest(high, p3)[1]; lowest(low, p3)[1]" },
-  "Bollinger band reversion": { p1: 20, p2: 2, p3: 0, longEntry: "crossUp(close, sma(close, p1) - p2 * stdev(close, p1))", shortEntry: "crossDown(close, sma(close, p1) + p2 * stdev(close, p1))", exitLong: "crossUp(close, sma(close, p1))", exitShort: "crossDown(close, sma(close, p1))", plot: "sma(close, p1) + p2 * stdev(close, p1); sma(close, p1); sma(close, p1) - p2 * stdev(close, p1)" },
+  "Bollinger band reversion": { p1: 20, p2: 2, p3: 0, longEntry: "crossUp(close, bbLower(close, p1, p2))", shortEntry: "crossDown(close, bbUpper(close, p1, p2))", exitLong: "crossUp(close, bbMiddle(close, p1))", exitShort: "crossDown(close, bbMiddle(close, p1))", plot: "bbUpper(close, p1, p2); bbMiddle(close, p1); bbLower(close, p1, p2)" },
+  "MACD cross above zero filter": { p1: 12, p2: 26, p3: 9, longEntry: "crossUp(macd(close, p1, p2, p3), macdSignal(close, p1, p2, p3)) and close > ema(close, 200)", shortEntry: "crossDown(macd(close, p1, p2, p3), macdSignal(close, p1, p2, p3)) and close < ema(close, 200)", exitLong: "crossDown(macdHist(close, p1, p2, p3), 0)", exitShort: "crossUp(macdHist(close, p1, p2, p3), 0)", plot: "ema(close, 200)" },
 };
 const RULE_CHEAT = `
 <p><b>Price data</b> (whole history): open, high, low, close, volume, hl2, hlc3, range, vwap, hour (UTC 0–23), dayofweek (0 = Sunday)</p>
 <p><b>Order flow</b>: buyVolume, sellVolume, delta (buy − sell volume), deltaPct (delta as % of volume, −100 to 100), cumDelta</p>
 <p><b>Bars ago</b>: close[1] = previous close, high[2] = high two bars ago, ema(close, 20)[1] = last bar's EMA</p>
 <p><b>Indicators</b>: ema(src, n), sma(src, n), rsi(src, n), atr(n), highest(src, n), lowest(src, n), stdev(src, n), change(src, n), abs(x), min(a, b), max(a, b)</p>
+<p><b>MACD</b>: macd(src, fast, slow, signal), macdSignal(…), macdHist(…) — defaults 12, 26, 9. <b>Bollinger Bands</b>: bbUpper(src, n, mult), bbMiddle(src, n), bbLower(src, n, mult) — defaults 20, 2</p>
 <p><b>Conditions</b>: crossUp(a, b), crossDown(a, b), rising(src, n), falling(src, n), &lt; &lt;= &gt; &gt;= == !=, and, or, not, ( )</p>
 <p><b>Your numbers</b>: p1, p2, p3 come from the boxes above, so the optimizer can tune them.</p>
 <p>Rules are checked when each bar closes; trades fill at the next bar's open. Stops and targets come from the Risk panel.</p>`;
@@ -547,8 +566,8 @@ function pineToRules(src) {
   const tidy = s => stripOuter(s.replace(/\s+and\s+true\b/g, "").replace(/\btrue\s+and\s+/g, ""));
   const MAP = { "ta.ema": "ema", "ta.sma": "sma", "ta.rma": "ema", "ta.rsi": "rsi", "ta.atr": "atr", "ta.highest": "highest", "ta.lowest": "lowest", "ta.stdev": "stdev",
     "ta.change": "change", "ta.crossover": "crossUp", "ta.crossunder": "crossDown", "ta.rising": "rising", "ta.falling": "falling", "math.abs": "abs", "math.max": "max", "math.min": "min",
-    crossover: "crossUp", crossunder: "crossDown", stdev: "stdev", highest: "highest", lowest: "lowest", change: "change", abs: "abs", max: "max", min: "min", rma: "ema", "ta.cum": null };
-  const KNOWN = new Set(["dayofweek", "range", "open", "high", "low", "close", "volume", "hl2", "hlc3", "true", "false", "and", "or", "not", "ema", "sma", "rsi", "atr", "vwap", "hour", "rising", "falling", "p1", "p2", "p3"]);
+    crossover: "crossUp", crossunder: "crossDown", stdev: "stdev", highest: "highest", lowest: "lowest", change: "change", abs: "abs", max: "max", min: "min", rma: "ema", "ta.cum": null, "ta.bbw": null };
+  const KNOWN = new Set(["dayofweek", "range", "open", "high", "low", "close", "volume", "hl2", "hlc3", "true", "false", "and", "or", "not", "ema", "sma", "rsi", "atr", "vwap", "hour", "rising", "falling", "p1", "p2", "p3", "macd", "macdSignal", "macdHist", "bbUpper", "bbMiddle", "bbLower"]);
   function tr(e) {
     let s = e.trim();
     if (/\?/.test(s)) warn.add("Ternary expressions (a ? b : c) are not supported. Rewrite that line as separate rules.");
@@ -589,7 +608,19 @@ function pineToRules(src) {
     if (text === "else") { const prev = lastIf[ind] || []; stack.push({ ind, cond: prev.map(p => `not (${p})`).join(" and ") || "true" }); continue; }
     if ((m = text.match(/^if\s+(.+)$/))) { const c = tr(m[1]); stack.push({ ind, cond: c }); lastIf[ind] = [c]; continue; }
     if (/^\w+\s*\([^)]*\)\s*=>/.test(text)) { warn.add("Custom functions (name(x) => …) are not supported. Inline them, or ask for the strategy to be added as a built-in setup."); continue; }
-    if (/^\[.*\]\s*=/.test(text)) { warn.add(`Tuple results like "${text.slice(0, 40)}…" (e.g. ta.macd, ta.bb) are not supported yet.`); continue; }
+    if ((m = text.match(/^\[([^\]]+)\]\s*:?=\s*(?:ta\.)?(macd|bb|kc|dmi|supertrend)\s*\((.*)\)\s*$/))) {
+      const names = m[1].split(",").map(x => x.trim()), fn = m[2], args = splitTop(m[3]).map(a => stripOuter(tr(a)));
+      if (fn === "macd") {
+        if (args.length !== 4) { warn.add("ta.macd needs 4 values: source, fast, slow, signal."); continue; }
+        ["macd", "macdSignal", "macdHist"].forEach((f, k) => { if (names[k] && names[k] !== "_") defs[names[k]] = `${f}(${args.join(", ")})`; });
+      } else if (fn === "bb") {
+        if (args.length !== 3) { warn.add("ta.bb needs 3 values: source, length, multiplier."); continue; }
+        const [src, len, mult] = args;
+        [`bbMiddle(${src}, ${len})`, `bbUpper(${src}, ${len}, ${mult})`, `bbLower(${src}, ${len}, ${mult})`].forEach((e, k) => { if (names[k] && names[k] !== "_") defs[names[k]] = e; });
+      } else warn.add(`ta.${fn} is not supported yet.`);
+      continue;
+    }
+    if (/^\[.*\]\s*:?=/.test(text)) { warn.add(`Multi-value results like "${text.slice(0, 40)}…" are only supported for ta.macd and ta.bb.`); continue; }
     if ((m = text.match(/^(?:var\s+|varip\s+)?(?:(?:float|int|bool|string|color|series\s+\w+|simple\s+\w+)\s+)?([A-Za-z_]\w*)\s*(:=|=(?!=))\s*(.+)$/))) {
       const [, name, op, rhs] = m;
       const inp = rhs.match(/^input(?:\.\w+)?\s*\((.*)\)$/);
