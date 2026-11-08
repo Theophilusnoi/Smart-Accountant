@@ -1,0 +1,228 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      font-family: Inter, sans-serif;
+      color: #1f2937;
+    }
+    #desk-ground {
+      position: absolute;
+      inset: 0;
+      background: #d8d2c4;
+      z-index: 1;
+    }
+    #desk-flood {
+      position: absolute;
+      inset: 0;
+      background: #f9fafb;
+      opacity: 0;
+      z-index: 3;
+    }
+    .desk-paper {
+      position: absolute;
+      left: 260px;
+      top: 170px;
+      width: 600px;
+      height: 780px;
+      background: #ffffff;
+      border-radius: 6px;
+      box-shadow: 0 18px 44px rgba(40, 30, 10, 0.22);
+      padding: 56px;
+    }
+    .desk-pile {
+      z-index: 2;
+    }
+    .desk-pile .bar {
+      height: 18px;
+      background: #e5e7eb;
+      border-radius: 4px;
+      margin-bottom: 22px;
+    }
+    .desk-pile .bar.head {
+      width: 46%;
+      height: 34px;
+      background: #d1d5db;
+      margin-bottom: 48px;
+    }
+    #desk-inv {
+      z-index: 5;
+    }
+    .inv-head {
+      font-size: 44px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      color: #111827;
+    }
+    .inv-no {
+      font-size: 28px;
+      color: #4b5563;
+      margin-top: 8px;
+    }
+    .inv-label {
+      font-size: 28px;
+      color: #6b7280;
+      margin-top: 44px;
+    }
+    .inv-val {
+      font-size: 34px;
+      font-weight: 700;
+      color: #111827;
+      margin-top: 4px;
+    }
+    .inv-line {
+      display: flex;
+      justify-content: space-between;
+      font-size: 28px;
+      color: #374151;
+      margin-top: 56px;
+      padding-bottom: 20px;
+      border-bottom: 2px solid #e5e7eb;
+    }
+    .inv-total {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-top: 28px;
+      font-size: 34px;
+      font-weight: 700;
+      color: #111827;
+    }
+    .inv-total b {
+      font-size: 44px;
+      font-weight: 900;
+    }
+    .desk-title {
+      position: absolute;
+      left: 1010px;
+      top: 410px;
+      width: 820px;
+      font-size: 84px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      z-index: 4;
+    }
+    .desk-title .w {
+      display: inline-block;
+      margin-right: 0.22em;
+    }
+    #desk-cursor {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 44px;
+      height: 60px;
+      z-index: 6;
+    }
+  </style>
+  <div
+    id="root"
+    data-composition-id="desk"
+    data-width="1920"
+    data-height="1080"
+    data-layout-allow-overlap
+    data-layout-allow-overflow
+  >
+    <div id="desk-ground"></div>
+
+    <div class="desk-paper desk-pile" id="desk-p1"><div class="bar head"></div><div class="bar"></div><div class="bar"></div><div class="bar" style="width: 70%"></div></div>
+    <div class="desk-paper desk-pile" id="desk-p2"><div class="bar head"></div><div class="bar"></div><div class="bar" style="width: 80%"></div><div class="bar"></div></div>
+    <div class="desk-paper desk-pile" id="desk-p3"><div class="bar head"></div><div class="bar"></div><div class="bar"></div><div class="bar" style="width: 60%"></div></div>
+    <div class="desk-paper desk-pile" id="desk-p4"><div class="bar head"></div><div class="bar" style="width: 75%"></div><div class="bar"></div><div class="bar"></div></div>
+    <div class="desk-paper desk-pile" id="desk-p5"><div class="bar head"></div><div class="bar"></div><div class="bar"></div><div class="bar" style="width: 65%"></div></div>
+    <div class="desk-paper desk-pile" id="desk-p6"><div class="bar head"></div><div class="bar"></div><div class="bar" style="width: 85%"></div><div class="bar"></div></div>
+
+    <div id="desk-flood"></div>
+
+    <h2 class="desk-title" id="desk-t1"><span class="w">Another</span><span class="w">invoice</span><span class="w">to</span><span class="w">type</span><span class="w">in</span></h2>
+    <h2 class="desk-title" id="desk-t2"><span class="w">And</span><span class="w">another.</span><br /><span class="w">And</span><span class="w">another.</span></h2>
+    <h2 class="desk-title" id="desk-t3"><span class="w">What</span><span class="w">if</span><span class="w">it</span><span class="w">read</span><span class="w">itself?</span></h2>
+
+    <div class="desk-paper" id="desk-inv" data-layout-ignore>
+      <div class="inv-head">INVOICE</div>
+      <div class="inv-no">INV-2025-001</div>
+      <div class="inv-label">From</div>
+      <div class="inv-val">ABC Office Supplies</div>
+      <div class="inv-label">Date</div>
+      <div class="inv-val">2025-01-10</div>
+      <div class="inv-line"><span>Office supplies and stationery</span><span>$234.50</span></div>
+      <div class="inv-total"><span>Total</span><b>$234.50</b></div>
+    </div>
+
+    <svg id="desk-cursor" viewBox="0 0 22 30">
+      <path d="M2 2 L2 24 L8 18.5 L12 27 L15.5 25.5 L11.5 17 L19 17 Z" fill="#111111" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round" />
+    </svg>
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+
+      // Starting states
+      gsap.set("#desk-inv", { rotation: -4, x: 0, y: 0, scale: 1 });
+      gsap.set("#desk-cursor", { x: 1900, y: 1150, scale: 1, transformOrigin: "4px 4px" });
+      gsap.set(".desk-title .w", { opacity: 0 });
+
+      // Title 1: per-word blur in
+      tl.fromTo(
+        "#desk-t1 .w",
+        { opacity: 0, filter: "blur(6px)" },
+        { opacity: 1, filter: "blur(0px)", duration: 0.13, stagger: 0.067, ease: "power4.out" },
+        0.05,
+      );
+      tl.to("#desk-t1 .w", { opacity: 0, filter: "blur(8px)", duration: 0.15, stagger: 0.03, ease: "power3.in" }, 1.85);
+
+      // The pile grows behind the invoice
+      const pile = [
+        ["#desk-p1", 70, -30, 6],
+        ["#desk-p2", -60, 20, -9],
+        ["#desk-p3", 120, 40, 11],
+        ["#desk-p4", -110, -50, -14],
+        ["#desk-p5", 30, 70, 3],
+        ["#desk-p6", 150, -60, 16],
+      ];
+      pile.forEach(([sel, dx, dy, rot], i) => {
+        const t = 1.8 + i * 0.18;
+        gsap.set(sel, { x: dx, y: dy - 1150, rotation: rot + 18, opacity: 1, filter: "blur(0px)" });
+        tl.fromTo(
+          sel,
+          { x: dx, y: dy - 1150, rotation: rot + 18, opacity: 1, filter: "blur(0px)" },
+          { y: dy + 6, rotation: rot, duration: 0.38, ease: "power2.in" },
+          t,
+        );
+        tl.to(sel, { y: dy, duration: 0.14, ease: "power2.out" }, t + 0.38);
+      });
+
+      // Title 2: grey to ink, word by word
+      tl.fromTo(
+        "#desk-t2 .w",
+        { opacity: 0, color: "#7a756b" },
+        { opacity: 1, color: "#1f2937", duration: 0.2, stagger: 0.09, ease: "power2.out" },
+        2.2,
+      );
+      tl.to("#desk-t2 .w", { opacity: 0, filter: "blur(8px)", duration: 0.15, stagger: 0.03, ease: "power3.in" }, 3.6);
+
+      // Cursor enters and grabs the invoice
+      tl.to("#desk-cursor", { x: 596, y: 496, duration: 0.6, ease: "expo.out" }, 3.6);
+      tl.to("#desk-cursor", { scale: 0.88, duration: 0.08, ease: "power2.out" }, 4.3);
+
+      // Title 3: the question
+      tl.fromTo(
+        "#desk-t3 .w",
+        { opacity: 0, filter: "blur(6px)" },
+        { opacity: 1, filter: "blur(0px)", duration: 0.13, stagger: 0.067, ease: "power4.out" },
+        4.1,
+      );
+      tl.to("#desk-t3 .w", { opacity: 0, filter: "blur(8px)", duration: 0.15, stagger: 0.02, ease: "power3.in" }, 5.0);
+
+      // Carry: the invoice shrinks into the drop zone position while the desk floods to the app's gray-50
+      tl.to("#desk-inv", { x: 400, y: 90, scale: 0.26, rotation: 0, duration: 0.7, ease: "power2.inOut" }, 5.0);
+      tl.to("#desk-cursor", { x: 966, y: 630, duration: 0.7, ease: "power2.inOut" }, 5.0);
+      tl.to(".desk-pile", { opacity: 0, filter: "blur(15px)", duration: 0.3, ease: "power2.in" }, 5.0);
+      tl.to("#desk-flood", { opacity: 1, duration: 0.5, ease: "power2.inOut" }, 5.1);
+
+      window.__timelines["desk"] = tl;
+    })();
+  </script>
+</template>

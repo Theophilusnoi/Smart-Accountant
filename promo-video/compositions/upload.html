@@ -1,0 +1,421 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      background: #f9fafb;
+      font-family: Inter, sans-serif;
+      color: #111827;
+    }
+    /* App header (from Header.jsx) */
+    .app-header {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1920px;
+      height: 104px;
+      background: #ffffff;
+      border-bottom: 1px solid #e5e7eb;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 96px;
+      z-index: 10;
+    }
+    .app-brand {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      font-size: 34px;
+      font-weight: 700;
+    }
+    .app-badge {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      background: linear-gradient(90deg, #3b82f6, #9333ea);
+      color: #fff;
+      font-size: 28px;
+      font-weight: 900;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .app-nav {
+      display: flex;
+      gap: 12px;
+      font-size: 28px;
+      color: #374151;
+    }
+    .app-nav span {
+      padding: 10px 20px;
+      border-radius: 10px;
+    }
+    .app-nav .on {
+      color: #2563eb;
+      background: #eff6ff;
+    }
+    #up-cam {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1920px;
+      height: 1900px;
+      z-index: 2;
+    }
+    .up-h1 {
+      position: absolute;
+      left: 260px;
+      top: 136px;
+      font-size: 56px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .up-sub {
+      position: absolute;
+      left: 260px;
+      top: 212px;
+      font-size: 30px;
+      color: #4b5563;
+    }
+    .up-card {
+      position: absolute;
+      left: 260px;
+      width: 1400px;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 18px;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+      padding: 44px 48px;
+    }
+    #up-card1 {
+      top: 280px;
+      height: 740px;
+    }
+    #up-card2 {
+      top: 1040px;
+      height: 760px;
+    }
+    .up-ct {
+      font-size: 36px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .up-cd {
+      font-size: 28px;
+      color: #4b5563;
+      margin-top: 10px;
+    }
+    .up-dz {
+      position: absolute;
+      left: 48px;
+      top: 160px;
+      width: 1304px;
+      height: 430px;
+      border: 3px dashed #d1d5db;
+      border-radius: 16px;
+    }
+    #up-dz-active {
+      border-color: #3b82f6;
+      background: #eff6ff;
+    }
+    .up-dz-icon {
+      position: absolute;
+      left: 620px;
+      top: 26px;
+      width: 64px;
+      height: 64px;
+    }
+    .up-dz-t {
+      position: absolute;
+      left: 0;
+      width: 100%;
+      text-align: center;
+      top: 322px;
+      font-size: 34px;
+      font-weight: 700;
+    }
+    .up-dz-s {
+      position: absolute;
+      left: 0;
+      width: 100%;
+      text-align: center;
+      top: 372px;
+      font-size: 28px;
+      color: #6b7280;
+    }
+    #up-prog {
+      position: absolute;
+      left: 48px;
+      top: 612px;
+      width: 1304px;
+    }
+    .up-prow {
+      display: flex;
+      justify-content: space-between;
+      font-size: 28px;
+    }
+    .up-prow b {
+      font-weight: 700;
+    }
+    .up-prow span {
+      color: #6b7280;
+    }
+    .up-bar {
+      margin-top: 10px;
+      height: 14px;
+      border-radius: 7px;
+      background: #e5e7eb;
+      overflow: hidden;
+    }
+    #up-fill {
+      width: 100%;
+      height: 100%;
+      background: #2563eb;
+      transform-origin: 0 50%;
+    }
+    .up-pcap {
+      margin-top: 10px;
+      font-size: 28px;
+      color: #6b7280;
+    }
+    .up-grid {
+      position: absolute;
+      left: 48px;
+      top: 168px;
+      width: 1304px;
+    }
+    .up-f {
+      position: absolute;
+      width: 636px;
+    }
+    .up-f.wide {
+      width: 1304px;
+    }
+    .up-f label {
+      font-size: 28px;
+      font-weight: 700;
+      color: #374151;
+    }
+    .up-in {
+      margin-top: 8px;
+      height: 68px;
+      border: 2px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      font-size: 30px;
+      background: #fff;
+    }
+    #up-badge {
+      position: absolute;
+      left: 668px;
+      top: 400px;
+      height: 60px;
+      padding: 0 26px;
+      border: 2px solid #bbf7d0;
+      border-radius: 999px;
+      color: #16a34a;
+      font-size: 28px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+    }
+    .up-btn {
+      position: absolute;
+      top: 650px;
+      height: 68px;
+      border-radius: 10px;
+      font-size: 30px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+    }
+    #up-preview {
+      left: 834px;
+      width: 210px;
+      border: 2px solid #e5e7eb;
+      background: #fff;
+    }
+    #up-save {
+      left: 1062px;
+      width: 290px;
+      background: #18181b;
+      color: #fff;
+    }
+    /* carried invoice: same geometry as the desk scene's last frame */
+    #up-inv {
+      position: absolute;
+      left: 260px;
+      top: 170px;
+      width: 600px;
+      height: 780px;
+      background: #ffffff;
+      border-radius: 6px;
+      box-shadow: 0 18px 44px rgba(40, 30, 10, 0.22);
+      padding: 56px;
+      z-index: 8;
+    }
+    #up-inv .inv-head { font-size: 44px; font-weight: 900; letter-spacing: 0.08em; }
+    #up-inv .inv-no { font-size: 28px; color: #4b5563; margin-top: 8px; }
+    #up-inv .inv-label { font-size: 28px; color: #6b7280; margin-top: 44px; }
+    #up-inv .inv-val { font-size: 34px; font-weight: 700; margin-top: 4px; }
+    #up-inv .inv-line { display: flex; justify-content: space-between; font-size: 28px; color: #374151; margin-top: 56px; padding-bottom: 20px; border-bottom: 2px solid #e5e7eb; }
+    #up-inv .inv-total { display: flex; justify-content: space-between; align-items: baseline; margin-top: 28px; font-size: 34px; font-weight: 700; }
+    #up-inv .inv-total b { font-size: 44px; font-weight: 900; }
+    #up-cursor {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 44px;
+      height: 60px;
+      z-index: 12;
+    }
+  </style>
+  <div
+    id="root"
+    data-composition-id="upload"
+    data-width="1920"
+    data-height="1080"
+    data-layout-allow-overlap
+    data-layout-allow-overflow
+    data-composition-variables='[{"id":"brand-name","type":"string","label":"Product name","default":"Smart Accountant"}]'
+  >
+    <div id="up-cam">
+      <div class="up-h1" id="up-h1">Upload Invoice</div>
+      <div class="up-sub" id="up-sub">Upload and process invoices with AI-powered data extraction</div>
+
+      <div class="up-card" id="up-card1">
+        <div class="up-ct">AI-Powered Invoice Processing</div>
+        <div class="up-cd">Upload PDF or image files. Our AI will automatically extract key information.</div>
+        <div class="up-dz" id="up-dz">
+          <svg class="up-dz-icon" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+          <div class="up-dz-t">Drop files here or click to upload</div>
+          <div class="up-dz-s">Supports PDF, JPG, PNG files up to 10MB</div>
+        </div>
+        <div class="up-dz" id="up-dz-active"></div>
+        <div id="up-prog">
+          <div class="up-prow"><b>Processing...</b><span id="up-pct">0%</span></div>
+          <div class="up-bar"><div id="up-fill"></div></div>
+          <div class="up-pcap">AI is extracting data from your invoice...</div>
+        </div>
+      </div>
+
+      <div class="up-card" id="up-card2">
+        <div class="up-ct">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></svg>
+          Data Extracted Successfully
+        </div>
+        <div class="up-cd">Review and edit the extracted information before saving</div>
+        <div class="up-grid">
+          <div class="up-f" style="left: 0; top: 0"><label>Vendor</label><div class="up-in" id="up-in1"><span class="up-v" id="up-v1">ABC Office Supplies</span></div></div>
+          <div class="up-f" style="left: 668px; top: 0"><label>Amount</label><div class="up-in" id="up-in2"><span class="up-v" id="up-v2">234.50</span></div></div>
+          <div class="up-f" style="left: 0; top: 120px"><label>Date</label><div class="up-in" id="up-in3"><span class="up-v" id="up-v3">01/10/2025</span></div></div>
+          <div class="up-f" style="left: 668px; top: 120px"><label>Invoice Number</label><div class="up-in" id="up-in4"><span class="up-v" id="up-v4">INV-2025-001</span></div></div>
+          <div class="up-f wide" style="left: 0; top: 240px"><label>Description</label><div class="up-in" id="up-in5"><span class="up-v" id="up-v5">Office supplies and stationery</span></div></div>
+          <div class="up-f" style="left: 0; top: 360px"><label>Category</label><div class="up-in" id="up-in6"><span class="up-v" id="up-v6">Office Expenses</span></div></div>
+          <div id="up-badge">95% Confidence</div>
+        </div>
+        <div class="up-btn" id="up-preview">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#111827" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+          Preview
+        </div>
+        <div class="up-btn" id="up-save">
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></svg>
+          Save Invoice
+        </div>
+      </div>
+    </div>
+
+    <div class="app-header" id="up-header">
+      <div class="app-brand"><div class="app-badge">AI</div><span data-var-text="brand-name">Smart Accountant</span></div>
+      <div class="app-nav"><span>Dashboard</span><span>Invoices</span><span class="on">Upload Invoice</span><span>Ledger</span></div>
+    </div>
+
+    <div id="up-inv" data-layout-ignore>
+      <div class="inv-head">INVOICE</div>
+      <div class="inv-no">INV-2025-001</div>
+      <div class="inv-label">From</div>
+      <div class="inv-val">ABC Office Supplies</div>
+      <div class="inv-label">Date</div>
+      <div class="inv-val">2025-01-10</div>
+      <div class="inv-line"><span>Office supplies and stationery</span><span>$234.50</span></div>
+      <div class="inv-total"><span>Total</span><b>$234.50</b></div>
+    </div>
+
+    <svg id="up-cursor" viewBox="0 0 22 30">
+      <path d="M2 2 L2 24 L8 18.5 L12 27 L15.5 25.5 L11.5 17 L19 17 Z" fill="#111111" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round" />
+    </svg>
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+
+      // Carried-in state from the desk scene
+      gsap.set("#up-inv", { x: 400, y: 90, scale: 0.26, rotation: 0, opacity: 1, filter: "blur(0px)" });
+      gsap.set("#up-cursor", { x: 966, y: 630, scale: 0.88, transformOrigin: "4px 4px" });
+      gsap.set("#up-prog", { opacity: 0 });
+      gsap.set("#up-fill", { scaleX: 0 });
+      gsap.set(".up-v", { opacity: 0 });
+      gsap.set("#up-badge", { opacity: 0, scale: 0.7 });
+
+      // The app builds around the invoice
+      tl.fromTo("#up-header", { y: -104 }, { y: 0, duration: 0.5, ease: "expo.out" }, 0);
+      tl.fromTo("#up-h1, #up-sub", { opacity: 0, filter: "blur(8px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.2, stagger: 0.06, ease: "power4.out" }, 0.1);
+      tl.fromTo("#up-card1", { opacity: 0, scale: 0.97 }, { opacity: 1, scale: 1, duration: 0.45, ease: "expo.out" }, 0.05);
+      tl.fromTo("#up-dz-active", { opacity: 1 }, { opacity: 1, duration: 0.01 }, 0);
+
+      // Drop
+      tl.to("#up-cursor", { scale: 1, x: 1716, y: 700, duration: 0.5, ease: "power2.out" }, 0.9);
+      tl.to("#up-inv", { scale: 0.2, opacity: 0, filter: "blur(6px)", duration: 0.3, ease: "power3.in" }, 0.95);
+      tl.to("#up-dz-active", { opacity: 0, duration: 0.3, ease: "power2.out" }, 1.1);
+
+      // Processing 0 -> 100%
+      tl.fromTo("#up-prog", { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.15, ease: "power4.out" }, 1.15);
+      const pct = document.getElementById("up-pct");
+      const p = { v: 0 };
+      tl.fromTo("#up-fill", { scaleX: 0 }, { scaleX: 1, duration: 2.2, ease: "power1.inOut" }, 1.2);
+      tl.fromTo(
+        p,
+        { v: 0 },
+        {
+          v: 100,
+          duration: 2.2,
+          ease: "power1.inOut",
+          onUpdate: () => {
+            pct.textContent = Math.round(p.v) + "%";
+          },
+        },
+        1.2,
+      );
+
+      // Camera pans down to the extracted data
+      tl.fromTo("#up-cam", { y: 0 }, { y: -760, duration: 0.6, ease: "power2.inOut" }, 3.5);
+
+      // Fields fill in, one by one
+      for (let i = 1; i <= 6; i++) {
+        const t = 4.2 + (i - 1) * 0.25;
+        tl.fromTo("#up-v" + i, { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.15, ease: "power4.out" }, t);
+        tl.fromTo("#up-in" + i, { borderColor: "#3b82f6", backgroundColor: "#eff6ff" }, { borderColor: "#e5e7eb", backgroundColor: "#ffffff", duration: 0.7, ease: "power2.out" }, t);
+      }
+      tl.to("#up-badge", { opacity: 1, duration: 0.1 }, 5.8);
+      tl.to("#up-badge", { scale: 1, duration: 0.35, ease: "back.out(1.6)" }, 5.8);
+
+      // Cursor clicks Save Invoice
+      tl.to("#up-cursor", { x: 1463, y: 960, duration: 0.6, ease: "expo.out" }, 6.1);
+      tl.to("#up-cursor", { scale: 0.88, duration: 0.07, ease: "power2.out" }, 6.9);
+      tl.to("#up-save", { scale: 0.96, backgroundColor: "#000000", duration: 0.07, ease: "power2.out" }, 6.9);
+      tl.to("#up-cursor", { scale: 1, duration: 0.12, ease: "power2.out" }, 6.97);
+      tl.to("#up-save", { scale: 1, duration: 0.12, ease: "power2.out" }, 6.97);
+
+      window.__timelines["upload"] = tl;
+    })();
+  </script>
+</template>

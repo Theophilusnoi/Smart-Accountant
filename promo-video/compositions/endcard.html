@@ -1,0 +1,183 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      font-family: Inter, sans-serif;
+    }
+    #e-ground {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, #2563eb, #9333ea);
+      z-index: 1;
+    }
+    #e-white {
+      position: absolute;
+      inset: 0;
+      background: #ffffff;
+      opacity: 0;
+      z-index: 2;
+    }
+    #e-claim {
+      position: absolute;
+      left: 0;
+      top: 250px;
+      width: 1920px;
+      text-align: center;
+      color: #ffffff;
+      z-index: 3;
+    }
+    #e-num {
+      font-size: 300px;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    #e-line {
+      font-size: 72px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-top: 20px;
+    }
+    #e-line .w {
+      display: inline-block;
+      margin: 0 0.12em;
+    }
+    #e-lock {
+      position: absolute;
+      left: 0;
+      top: 360px;
+      width: 1920px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 26px;
+      z-index: 4;
+    }
+    #e-badge {
+      width: 96px;
+      height: 96px;
+      border-radius: 22px;
+      background: linear-gradient(90deg, #3b82f6, #9333ea);
+      color: #ffffff;
+      font-size: 40px;
+      font-weight: 900;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #e-word {
+      font-size: 64px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #111827;
+    }
+    #e-tag {
+      position: absolute;
+      left: 0;
+      top: 510px;
+      width: 1920px;
+      text-align: center;
+      font-size: 36px;
+      color: #4b5563;
+      z-index: 4;
+    }
+    #e-tag em {
+      font-style: normal;
+      font-weight: 700;
+      background: linear-gradient(90deg, #2563eb, #9333ea);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    #e-cta-wrap {
+      position: absolute;
+      left: 0;
+      top: 630px;
+      width: 1920px;
+      display: flex;
+      justify-content: center;
+      z-index: 4;
+    }
+    #e-cta {
+      padding: 26px 60px;
+      border-radius: 14px;
+      background: linear-gradient(90deg, #2563eb, #9333ea);
+      color: #ffffff;
+      font-size: 34px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      box-shadow: 0 10px 24px rgba(37, 99, 235, 0.25);
+    }
+  </style>
+  <div
+    id="root"
+    data-composition-id="endcard"
+    data-width="1920"
+    data-height="1080"
+    data-layout-allow-overlap
+    data-composition-variables='[{"id":"brand-name","type":"string","label":"Product name","default":"Smart Accountant"},{"id":"cta","type":"string","label":"Call to action","default":"START MY FREE DEMO"}]'
+  >
+    <div id="e-ground"></div>
+    <div id="e-white"></div>
+
+    <div id="e-claim">
+      <div id="e-num">90%</div>
+      <div id="e-line"><span class="w">less</span><span class="w">manual</span><span class="w">data</span><span class="w">entry</span></div>
+    </div>
+
+    <div id="e-lock">
+      <div id="e-badge">AI</div>
+      <div id="e-word" data-var-text="brand-name">Smart Accountant</div>
+    </div>
+    <div id="e-tag">Next-Generation <em>AI-Powered</em> Accounting Software</div>
+    <div id="e-cta-wrap"><div id="e-cta" data-var-text="cta">START MY FREE DEMO</div></div>
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+
+      gsap.set("#e-line .w", { opacity: 0 });
+      gsap.set("#e-badge", { opacity: 0 });
+      gsap.set("#e-word", { clipPath: "inset(0% 100% 0% 0%)" });
+      gsap.set("#e-tag, #e-cta", { opacity: 0 });
+
+      // Whip in: the brand ground slides over the dashboard
+      tl.fromTo("#e-ground", { x: 1920 }, { x: 0, duration: 0.3, ease: "expo.out" }, 0);
+      tl.fromTo("#e-num", { x: 320, opacity: 0, filter: "blur(20px)" }, { x: 0, opacity: 1, filter: "blur(0px)", duration: 0.4, ease: "expo.out" }, 0.05);
+
+      // The number counts up and lands
+      const num = document.getElementById("e-num");
+      const n = { v: 0 };
+      tl.fromTo(
+        n,
+        { v: 0 },
+        {
+          v: 90,
+          duration: 0.9,
+          ease: "power2.out",
+          onUpdate: () => {
+            num.textContent = Math.round(n.v) + "%";
+          },
+        },
+        0.25,
+      );
+      tl.fromTo("#e-line .w", { opacity: 0, filter: "blur(6px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.13, stagger: 0.067, ease: "power4.out" }, 0.95);
+
+      // Claim exits, ground floods to white
+      tl.to("#e-num", { opacity: 0, filter: "blur(10px)", duration: 0.2, ease: "power3.in" }, 3.4);
+      tl.to("#e-line .w", { opacity: 0, filter: "blur(8px)", duration: 0.15, stagger: 0.03, ease: "power3.in" }, 3.42);
+      tl.to("#e-white", { opacity: 1, duration: 0.4, ease: "power2.inOut" }, 3.5);
+
+      // The mark drops in, the wordmark wipes in beside it
+      tl.fromTo("#e-badge", { y: -700, rotation: -14, opacity: 1 }, { y: 0, rotation: 0, opacity: 1, duration: 0.9, ease: "elastic.out(1, 0.75)" }, 3.9);
+      tl.fromTo("#e-word", { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: 0.45, ease: "power3.out" }, 4.5);
+      tl.fromTo("#e-tag", { opacity: 0, filter: "blur(8px)" }, { opacity: 1, filter: "blur(0px)", duration: 0.2, ease: "power4.out" }, 5.0);
+      tl.fromTo("#e-cta", { opacity: 0, scale: 0.92 }, { opacity: 1, scale: 1, duration: 0.35, ease: "power4.out" }, 5.4);
+
+      window.__timelines["endcard"] = tl;
+    })();
+  </script>
+</template>
