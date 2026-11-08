@@ -1,0 +1,930 @@
+<title>FlowDesk Backtester</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: trading-terminal shell — control rail on the left, chart stack + results tabs on the right; stacks to one column on phones. */
+:root {
+  --ink: #0f1620;        /* page ground */
+  --panel: #151f2b;      /* raised surfaces */
+  --line: #24323f;       /* hairlines */
+  --text: #d6dee6;
+  --muted: #8193a3;
+  --brass: #e0a943;      /* accent */
+  --up: #3fb6a0;         /* buy / long / profit */
+  --down: #e0665a;       /* sell / short / loss */
+  --font-display: "Chakra Petch", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--ink); color: var(--text); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--panel); }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--brass); outline-offset: 1px; }
+
+header.top {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+}
+.brand { font-family: var(--font-display); font-weight: 600; font-size: 19px; letter-spacing: .04em; display: flex; align-items: baseline; gap: 8px; }
+.brand b { color: var(--brass); font-weight: 600; }
+.brand small { font-family: var(--font-data); font-size: 11px; color: var(--muted); letter-spacing: 0; }
+.dataset { font-family: var(--font-data); font-size: 12px; color: var(--muted); margin-left: auto; min-width: 0; overflow-wrap: anywhere; }
+
+.shell {
+  display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px;
+  padding-block: 16px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+@media (max-width: 900px) { .shell { grid-template-columns: minmax(0, 1fr); } }
+
+aside.rail { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+details.box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+details.box > summary {
+  cursor: pointer; list-style: none; padding: 10px 12px; font-family: var(--font-display); font-weight: 500;
+  text-transform: uppercase; letter-spacing: .08em; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between;
+}
+details.box > summary::after { content: "+"; }
+details.box[open] > summary::after { content: "–"; }
+details.box > summary::-webkit-details-marker { display: none; }
+.box-body { padding: 0 12px 12px; display: grid; gap: 10px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+label.f { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
+label.f input, label.f select {
+  background: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font-family: var(--font-data); font-size: 13px; width: 100%; min-width: 0;
+}
+.chk { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.hint { font-size: 12px; color: var(--muted); margin: 0; }
+.err { font-size: 12px; color: var(--down); margin: 0; }
+.btn {
+  background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 7px 12px; cursor: pointer; font-size: 13px; font-weight: 500;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--brass); border-color: var(--brass); color: #1a1408; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.on { border-color: var(--brass); color: var(--brass); }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.seg { display: flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.seg button { flex: 1; background: transparent; border: 0; padding: 6px 4px; font-size: 12px; cursor: pointer; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--line); color: var(--text); }
+.strat-desc { font-size: 12px; color: var(--muted); margin: 0; border-left: 2px solid var(--line); padding-left: 8px; }
+
+main.stage { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.kpi { background: var(--panel); padding: 8px 10px; min-width: 0; }
+.kpi .k { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+.kpi .v { font-family: var(--font-data); font-size: 17px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pos { color: var(--up); } .neg { color: var(--down); }
+
+.chartwrap { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.chart-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 10px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.chart-head .ttl { font-family: var(--font-display); text-transform: uppercase; letter-spacing: .08em; color: var(--text); }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
+#priceChart { height: 380px; }
+#flowChart { height: 120px; border-top: 1px solid var(--line); }
+#equityChart { height: 200px; }
+@media (max-width: 600px) { #priceChart { height: 300px; } }
+
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; cursor: pointer; color: var(--muted); font-family: var(--font-display); text-transform: uppercase; letter-spacing: .07em; font-size: 12px; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--brass); }
+.tabpanel { padding-top: 12px; display: grid; gap: 12px; min-width: 0; }
+.tablewrap { overflow-x: auto; max-height: 420px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; }
+table { border-collapse: collapse; width: 100%; font-family: var(--font-data); font-size: 12px; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+tbody tr:hover { background: rgba(224,169,67,.06); }
+tr.click { cursor: pointer; }
+.pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; border: 1px solid currentColor; }
+.statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 24px; }
+.statgrid div { display: flex; justify-content: space-between; border-bottom: 1px dashed var(--line); padding: 5px 0; font-size: 13px; gap: 8px; }
+.statgrid span:last-child { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.heat { display: grid; gap: 2px; overflow-x: auto; }
+.heat div { font-family: var(--font-data); font-size: 10px; padding: 4px 2px; text-align: center; border-radius: 2px; cursor: pointer; min-width: 38px; }
+.heat .ax { background: transparent; color: var(--muted); cursor: default; }
+
+.replaybar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.replaybar input[type=range] { flex: 1; min-width: 160px; accent-color: var(--brass); }
+.siglist { display: grid; gap: 4px; font-family: var(--font-data); font-size: 12px; max-height: 300px; overflow-y: auto; }
+.siglist div { display: flex; gap: 10px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+
+#toasts { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 8px; z-index: 20; max-width: min(360px, calc(100vw - 32px)); }
+.toast { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--brass); border-radius: 4px; padding: 10px 12px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
+.toast.long { border-left-color: var(--up); } .toast.short { border-left-color: var(--down); }
+@media (prefers-reduced-motion: no-preference) { .toast { animation: slide .2s ease-out; } @keyframes slide { from { transform: translateY(8px); opacity: .4; } } }
+</style>
+
+<header class="top">
+  <div class="brand"><b>Flow</b>Desk <small>order-flow backtester · personal</small></div>
+  <div class="dataset" id="datasetLabel">loading…</div>
+</header>
+
+<div class="shell">
+  <aside class="rail">
+    <details class="box" open>
+      <summary>Market data</summary>
+      <div class="box-body">
+        <div class="seg" role="group" aria-label="Data source">
+          <button type="button" data-src="demo" aria-pressed="true">Sample</button>
+          <button type="button" data-src="binance" aria-pressed="false">Binance</button>
+          <button type="button" data-src="csv" aria-pressed="false">CSV file</button>
+        </div>
+        <div id="srcDemo" class="box-body" style="padding:0">
+          <div class="row2">
+            <label class="f">Bars<input id="demoBars" type="number" value="3000" min="200" max="20000" step="100"></label>
+            <label class="f">Seed<input id="demoSeed" type="number" value="7"></label>
+          </div>
+          <p class="hint">Synthetic hourly bars with buy/sell volume split. Example data for trying strategies.</p>
+        </div>
+        <div id="srcBinance" class="box-body" style="padding:0" hidden>
+          <div class="row2">
+            <label class="f">Symbol<input id="bnSymbol" value="BTCUSDT" autocomplete="off"></label>
+            <label class="f">Interval<select id="bnInterval">
+              <option>5m</option><option>15m</option><option>30m</option><option selected>1h</option><option>4h</option><option>1d</option>
+            </select></label>
+          </div>
+          <div class="row2">
+            <label class="f">Bars<input id="bnBars" type="number" value="3000" min="100" max="20000" step="500"></label>
+            <label class="f">Exchange<select id="bnHost">
+              <option value="https://api.binance.com">binance.com</option>
+              <option value="https://api.binance.us">binance.us</option>
+            </select></label>
+          </div>
+          <p class="hint">Uses real taker buy volume, so delta is measured, not estimated. Needs internet; works when this file is opened in your own browser.</p>
+        </div>
+        <div id="srcCsv" class="box-body" style="padding:0" hidden>
+          <label class="f">OHLCV file<input id="csvFile" type="file" accept=".csv,text/csv"></label>
+          <p class="hint">Columns: time, open, high, low, close, volume, and optionally buy_volume. Works with TradingView, NinjaTrader and Yahoo exports. Without buy volume, delta is estimated from where each bar closes in its range.</p>
+        </div>
+        <div class="btns"><button class="btn primary" id="loadBtn" type="button">Load data</button></div>
+        <p class="err" id="dataErr" hidden></p>
+      </div>
+    </details>
+
+    <details class="box" open>
+      <summary>Strategy</summary>
+      <div class="box-body">
+        <label class="f">Setup<select id="stratSel"></select></label>
+        <p class="strat-desc" id="stratDesc"></p>
+        <div id="stratParams" class="row2"></div>
+        <label class="f">Trade direction<select id="dirSel">
+          <option value="both">Long and short</option><option value="long">Long only</option><option value="short">Short only</option>
+        </select></label>
+      </div>
+    </details>
+
+    <details class="box" open>
+      <summary>Risk &amp; costs</summary>
+      <div class="box-body">
+        <div class="row2">
+          <label class="f">Capital<input id="capital" type="number" value="10000" min="100" step="100"></label>
+          <label class="f">Risk / trade %<input id="riskPct" type="number" value="1" min="0.1" max="100" step="0.1"></label>
+          <label class="f">Stop (× ATR)<input id="stopAtr" type="number" value="2" min="0" step="0.25"></label>
+          <label class="f">Target (R)<input id="tpR" type="number" value="2" min="0" step="0.25"></label>
+          <label class="f">ATR length<input id="atrLen" type="number" value="14" min="2" step="1"></label>
+          <label class="f">Max bars held<input id="maxBars" type="number" value="0" min="0" step="1"></label>
+          <label class="f">Commission %<input id="commPct" type="number" value="0.04" min="0" step="0.01"></label>
+          <label class="f">Slippage %<input id="slipPct" type="number" value="0.02" min="0" step="0.01"></label>
+          <label class="f">Max leverage<input id="maxLev" type="number" value="1" min="0.1" step="0.5"></label>
+          <label class="f">Breakeven at (R)<input id="beR" type="number" value="0" min="0" step="0.25"></label>
+        </div>
+        <p class="hint">Stop 0 = no stop; size then uses Risk % as the share of equity per trade. Target 0 = exit on signal only.</p>
+        <div class="btns">
+          <button class="btn primary" id="runBtn" type="button">Run backtest</button>
+          <button class="btn" id="savePreset" type="button">Save preset</button>
+          <select id="presetSel" class="btn" aria-label="Saved presets"><option value="">Presets…</option></select>
+        </div>
+      </div>
+    </details>
+  </aside>
+
+  <main class="stage">
+    <section class="kpis" id="kpis" aria-label="Backtest summary"></section>
+
+    <section class="chartwrap">
+      <div class="chart-head">
+        <span class="ttl">Price</span>
+        <span class="legend" id="priceLegend"></span>
+        <label class="chk" style="margin-left:auto"><input type="checkbox" id="flowBars" checked> Flow-coloured bars</label>
+      </div>
+      <div id="priceChart"></div>
+      <div class="chart-head" style="border-top:1px solid var(--line)"><span class="ttl">Delta</span>
+        <span class="legend"><span><i style="background:var(--up)"></i>buy aggression</span><span><i style="background:var(--down)"></i>sell aggression</span><span><i style="background:var(--brass)"></i>cumulative delta</span></span>
+      </div>
+      <div id="flowChart"></div>
+    </section>
+
+    <section class="chartwrap">
+      <div class="chart-head"><span class="ttl">Equity</span>
+        <span class="legend"><span><i style="background:var(--brass)"></i>strategy</span><span><i style="background:var(--muted)"></i>buy &amp; hold</span><span><i style="background:var(--down)"></i>drawdown</span></span>
+      </div>
+      <div id="equityChart"></div>
+    </section>
+
+    <section>
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="trades">Trades</button>
+        <button role="tab" aria-selected="false" data-tab="stats">Statistics</button>
+        <button role="tab" aria-selected="false" data-tab="opt">Optimizer</button>
+        <button role="tab" aria-selected="false" data-tab="replay">Replay &amp; alerts</button>
+      </div>
+
+      <div class="tabpanel" data-panel="trades">
+        <div class="btns"><button class="btn" id="copyCsv" type="button">Copy trades as CSV</button><button class="btn" id="dlCsv" type="button">Download CSV</button><span class="hint" id="copyMsg"></span></div>
+        <div class="tablewrap"><table id="tradeTable"></table></div>
+      </div>
+
+      <div class="tabpanel" data-panel="stats" hidden>
+        <div class="statgrid" id="statGrid"></div>
+        <div class="tablewrap"><table id="monthTable"></table></div>
+      </div>
+
+      <div class="tabpanel" data-panel="opt" hidden>
+        <p class="hint">Grid-search two parameters of the current setup. The first part of the data is used to pick parameters (in-sample); the rest checks whether they hold up (out-of-sample). Click a result to load it.</p>
+        <div class="row2" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
+          <label class="f">Parameter X<select id="optX"></select></label>
+          <label class="f">X from<input id="optXmin" type="number" step="any"></label>
+          <label class="f">X to<input id="optXmax" type="number" step="any"></label>
+          <label class="f">X step<input id="optXstep" type="number" step="any"></label>
+          <label class="f">Parameter Y<select id="optY"></select></label>
+          <label class="f">Y from<input id="optYmin" type="number" step="any"></label>
+          <label class="f">Y to<input id="optYmax" type="number" step="any"></label>
+          <label class="f">Y step<input id="optYstep" type="number" step="any"></label>
+          <label class="f">Rank by<select id="optObj">
+            <option value="retdd">Return ÷ drawdown</option><option value="net">Net return %</option><option value="sharpe">Sharpe</option><option value="pf">Profit factor</option>
+          </select></label>
+          <label class="f">In-sample %<input id="optIS" type="number" value="70" min="10" max="100" step="5"></label>
+        </div>
+        <div class="btns"><button class="btn primary" id="optRun" type="button">Run optimizer</button><span class="hint" id="optMsg"></span></div>
+        <div class="heat" id="optHeat"></div>
+        <div class="tablewrap"><table id="optTable"></table></div>
+      </div>
+
+      <div class="tabpanel" data-panel="replay" hidden>
+        <p class="hint">Step through history bar by bar to see signals as they would have appeared. Turn on live watch to poll Binance and get a sound and on-screen alert when the current setup fires on a closed bar.</p>
+        <div class="replaybar">
+          <button class="btn" id="rpPlay" type="button">Play</button>
+          <button class="btn" id="rpStep" type="button">Step +1</button>
+          <input type="range" id="rpSlider" min="50" max="100" value="100" aria-label="Replay position">
+          <label class="f" style="width:90px">Speed<select id="rpSpeed"><option value="400">Slow</option><option value="120" selected>Normal</option><option value="30">Fast</option></select></label>
+          <button class="btn" id="rpExit" type="button">Show all</button>
+        </div>
+        <div class="btns">
+          <button class="btn" id="liveBtn" type="button">Start live watch</button>
+          <label class="chk"><input type="checkbox" id="soundOn" checked> Sound</label>
+          <span class="hint" id="liveMsg"></span>
+        </div>
+        <div class="siglist" id="sigList"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toasts" aria-live="polite"></div>
+
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+"use strict";
+/* ============================== Indicators ============================== */
+const IND = {
+  sma(a, n) { const o = new Array(a.length).fill(NaN); let s = 0; for (let i = 0; i < a.length; i++) { s += a[i]; if (i >= n) s -= a[i - n]; if (i >= n - 1) o[i] = s / n; } return o; },
+  ema(a, n) { const o = new Array(a.length).fill(NaN), k = 2 / (n + 1); let e = NaN; for (let i = 0; i < a.length; i++) { e = isNaN(e) ? a[i] : a[i] * k + e * (1 - k); if (i >= n - 1) o[i] = e; } return o; },
+  rsi(c, n) {
+    const o = new Array(c.length).fill(NaN); let ag = 0, al = 0;
+    for (let i = 1; i < c.length; i++) {
+      const d = c[i] - c[i - 1], g = Math.max(d, 0), l = Math.max(-d, 0);
+      if (i <= n) { ag += g / n; al += l / n; if (i === n) o[i] = al === 0 ? 100 : 100 - 100 / (1 + ag / al); }
+      else { ag = (ag * (n - 1) + g) / n; al = (al * (n - 1) + l) / n; o[i] = al === 0 ? 100 : 100 - 100 / (1 + ag / al); }
+    }
+    return o;
+  },
+  atr(b, n) {
+    const o = new Array(b.length).fill(NaN); let a = NaN, s = 0;
+    for (let i = 0; i < b.length; i++) {
+      const tr = i === 0 ? b[i].h - b[i].l : Math.max(b[i].h - b[i].l, Math.abs(b[i].h - b[i - 1].c), Math.abs(b[i].l - b[i - 1].c));
+      if (i < n) { s += tr; if (i === n - 1) { a = s / n; o[i] = a; } } else { a = (a * (n - 1) + tr) / n; o[i] = a; }
+    }
+    return o;
+  },
+  /* Session VWAP, resets each UTC day (or rolling n bars for daily+ data). */
+  vwap(b) {
+    const o = new Array(b.length); let pv = 0, vv = 0, day = -1;
+    const daily = b.length > 1 && (b[1].t - b[0].t) >= 86400;
+    for (let i = 0; i < b.length; i++) {
+      const d = daily ? Math.floor(i / 20) : Math.floor(b[i].t / 86400);
+      if (d !== day) { pv = 0; vv = 0; day = d; }
+      const tp = (b[i].h + b[i].l + b[i].c) / 3; pv += tp * b[i].v; vv += b[i].v; o[i] = vv ? pv / vv : tp;
+    }
+    return o;
+  },
+  highest(a, n) { const o = new Array(a.length).fill(NaN); for (let i = n - 1; i < a.length; i++) { let m = -Infinity; for (let j = i - n + 1; j <= i; j++) m = Math.max(m, a[j]); o[i] = m; } return o; },
+  lowest(a, n) { const o = new Array(a.length).fill(NaN); for (let i = n - 1; i < a.length; i++) { let m = Infinity; for (let j = i - n + 1; j <= i; j++) m = Math.min(m, a[j]); o[i] = m; } return o; },
+};
+const lag = (a, k = 1) => a.map((_, i) => i >= k ? a[i - k] : NaN);
+const crossUp = (a, b, i) => a[i - 1] <= b[i - 1] && a[i] > b[i];
+const crossDn = (a, b, i) => a[i - 1] >= b[i - 1] && a[i] < b[i];
+
+/* Order-flow features computed from each bar's buy/sell split. */
+function flowFeatures(b, volLen = 20) {
+  const delta = b.map(x => 2 * x.bv - x.v);
+  const dpct = b.map((x, i) => x.v ? delta[i] / x.v : 0);
+  const cum = []; let s = 0; for (const d of delta) { s += d; cum.push(s); }
+  const vol = b.map(x => x.v), volAvg = IND.sma(vol, volLen);
+  return { delta, dpct, cum, volAvg };
+}
+/* Flow bar state: 2 strong buy, 1 buy, -1 sell, -2 strong sell, 0 neutral. */
+function flowState(b, f, i, th = 0.25) {
+  const strongVol = b[i].v > 1.3 * (f.volAvg[i] || b[i].v);
+  if (f.dpct[i] > th) return strongVol ? 2 : 1;
+  if (f.dpct[i] < -th) return strongVol ? -2 : -1;
+  return 0;
+}
+
+/* ============================== Strategies ==============================
+   Each returns { sig, exit, overlays }. sig[i] = +1 / -1 entry on close of bar i.
+   exit[i] = +1 closes longs, -1 closes shorts, 2 closes either.               */
+const STRATS = {
+  flow_momentum: {
+    name: "Order-flow momentum",
+    desc: "Enters with aggressive buyers or sellers: a bar with strong delta and above-average volume, in the direction of the trend EMA.",
+    params: [
+      { k: "trend", l: "Trend EMA", d: 50, min: 5, max: 400, s: 1 },
+      { k: "deltaTh", l: "Delta % threshold", d: 30, min: 5, max: 90, s: 1 },
+      { k: "volMult", l: "Volume × average", d: 1.5, min: 0.5, max: 5, s: 0.1 },
+      { k: "volLen", l: "Volume average len", d: 20, min: 2, max: 200, s: 1 },
+    ],
+    run(b, p) {
+      const c = b.map(x => x.c), e = IND.ema(c, p.trend), f = flowFeatures(b, p.volLen);
+      const sig = b.map(() => 0), exit = b.map(() => 0);
+      for (let i = 1; i < b.length; i++) {
+        const big = b[i].v > p.volMult * f.volAvg[i];
+        if (big && f.dpct[i] > p.deltaTh / 100 && c[i] > e[i]) sig[i] = 1;
+        else if (big && f.dpct[i] < -p.deltaTh / 100 && c[i] < e[i]) sig[i] = -1;
+        if (crossDn(c, e, i)) exit[i] = 1; if (crossUp(c, e, i)) exit[i] = -1;
+      }
+      return { sig, exit, overlays: [{ name: "EMA " + p.trend, data: e, color: "#e0a943" }] };
+    },
+  },
+  absorption: {
+    name: "Absorption reversal",
+    desc: "Fades heavy one-sided aggression that fails to move price: high volume, small range, and the bar closes against its own delta. Filtered by session VWAP.",
+    params: [
+      { k: "volMult", l: "Volume × average", d: 1.3, min: 0.5, max: 6, s: 0.1 },
+      { k: "rangeMax", l: "Max range × ATR", d: 1.0, min: 0.1, max: 3, s: 0.05 },
+      { k: "deltaTh", l: "Delta % threshold", d: 8, min: 1, max: 90, s: 1 },
+      { k: "volLen", l: "Volume average len", d: 20, min: 2, max: 200, s: 1 },
+    ],
+    run(b, p) {
+      const f = flowFeatures(b, p.volLen), atr = IND.atr(b, 14), vw = IND.vwap(b);
+      const sig = b.map(() => 0), exit = b.map(() => 0);
+      for (let i = 1; i < b.length; i++) {
+        const r = b[i].h - b[i].l, big = b[i].v > p.volMult * f.volAvg[i], tight = r < p.rangeMax * atr[i - 1];
+        if (big && tight && f.dpct[i] < -p.deltaTh / 100 && b[i].c >= b[i].o && b[i].c < vw[i]) sig[i] = 1;
+        if (big && tight && f.dpct[i] > p.deltaTh / 100 && b[i].c <= b[i].o && b[i].c > vw[i]) sig[i] = -1;
+      }
+      return { sig, exit, overlays: [{ name: "VWAP", data: vw, color: "#9aa9ff" }] };
+    },
+  },
+  delta_divergence: {
+    name: "Cumulative delta divergence",
+    desc: "Price makes a new N-bar high while cumulative delta does not (sellers hiding) → short; mirror for longs.",
+    params: [
+      { k: "look", l: "Lookback bars", d: 20, min: 5, max: 200, s: 1 },
+      { k: "trend", l: "Exit EMA", d: 20, min: 3, max: 200, s: 1 },
+    ],
+    run(b, p) {
+      const c = b.map(x => x.c), h = b.map(x => x.h), l = b.map(x => x.l), f = flowFeatures(b);
+      const hh = lag(IND.highest(h, p.look)), ll = lag(IND.lowest(l, p.look));
+      const ch = lag(IND.highest(f.cum, p.look)), cl = lag(IND.lowest(f.cum, p.look)), e = IND.ema(c, p.trend);
+      const sig = b.map(() => 0), exit = b.map(() => 0);
+      for (let i = 1; i < b.length; i++) {
+        if (h[i] > hh[i] && f.cum[i] < ch[i] && c[i] < b[i].o) sig[i] = -1;
+        if (l[i] < ll[i] && f.cum[i] > cl[i] && c[i] > b[i].o) sig[i] = 1;
+        if (crossDn(c, e, i)) exit[i] = 1; if (crossUp(c, e, i)) exit[i] = -1;
+      }
+      return { sig, exit, overlays: [{ name: "EMA " + p.trend, data: e, color: "#e0a943" }] };
+    },
+  },
+  ema_cross: {
+    name: "EMA crossover",
+    desc: "Classic trend following: long when the fast EMA crosses above the slow EMA, short on the cross below. Opposite cross exits.",
+    params: [{ k: "fast", l: "Fast EMA", d: 12, min: 2, max: 200, s: 1 }, { k: "slow", l: "Slow EMA", d: 48, min: 3, max: 400, s: 1 }],
+    run(b, p) {
+      const c = b.map(x => x.c), f = IND.ema(c, p.fast), s = IND.ema(c, p.slow);
+      const sig = b.map(() => 0), exit = b.map(() => 0);
+      for (let i = 1; i < b.length; i++) { if (crossUp(f, s, i)) { sig[i] = 1; exit[i] = -1; } if (crossDn(f, s, i)) { sig[i] = -1; exit[i] = 1; } }
+      return { sig, exit, overlays: [{ name: "EMA " + p.fast, data: f, color: "#e0a943" }, { name: "EMA " + p.slow, data: s, color: "#9aa9ff" }] };
+    },
+  },
+  rsi_revert: {
+    name: "RSI mean reversion",
+    desc: "Buys when RSI crosses back up through the oversold level and sells when it crosses down through overbought. Exits when RSI crosses 50.",
+    params: [
+      { k: "len", l: "RSI length", d: 14, min: 2, max: 100, s: 1 },
+      { k: "lo", l: "Oversold", d: 30, min: 5, max: 50, s: 1 },
+      { k: "hi", l: "Overbought", d: 70, min: 50, max: 95, s: 1 },
+    ],
+    run(b, p) {
+      const r = IND.rsi(b.map(x => x.c), p.len), sig = b.map(() => 0), exit = b.map(() => 0);
+      for (let i = 1; i < b.length; i++) {
+        if (r[i - 1] < p.lo && r[i] >= p.lo) sig[i] = 1;
+        if (r[i - 1] > p.hi && r[i] <= p.hi) sig[i] = -1;
+        if (r[i - 1] < 50 && r[i] >= 50) exit[i] = -1; if (r[i - 1] > 50 && r[i] <= 50) exit[i] = 1;
+      }
+      return { sig, exit, overlays: [] };
+    },
+  },
+  breakout: {
+    name: "Donchian breakout",
+    desc: "Turtle-style: enter on a close beyond the highest high or lowest low of the last N bars; exit on the opposite channel of half that length.",
+    params: [{ k: "len", l: "Entry channel", d: 40, min: 5, max: 400, s: 1 }, { k: "exitLen", l: "Exit channel", d: 20, min: 2, max: 200, s: 1 }],
+    run(b, p) {
+      const c = b.map(x => x.c), h = b.map(x => x.h), l = b.map(x => x.l);
+      const up = lag(IND.highest(h, p.len)), dn = lag(IND.lowest(l, p.len)), xu = lag(IND.highest(h, p.exitLen)), xd = lag(IND.lowest(l, p.exitLen));
+      const sig = b.map(() => 0), exit = b.map(() => 0);
+      for (let i = 1; i < b.length; i++) { if (c[i] > up[i]) sig[i] = 1; else if (c[i] < dn[i]) sig[i] = -1; if (c[i] < xd[i]) exit[i] = 1; if (c[i] > xu[i]) exit[i] = -1; }
+      return { sig, exit, overlays: [{ name: "High " + p.len, data: up, color: "#3fb6a0" }, { name: "Low " + p.len, data: dn, color: "#e0665a" }] };
+    },
+  },
+  vwap_revert: {
+    name: "VWAP reversion",
+    desc: "Fades stretches away from session VWAP of more than K × ATR, aiming for a return to VWAP.",
+    params: [{ k: "k", l: "Stretch (× ATR)", d: 2, min: 0.5, max: 6, s: 0.1 }],
+    run(b, p) {
+      const vw = IND.vwap(b), atr = IND.atr(b, 14), sig = b.map(() => 0), exit = b.map(() => 0);
+      for (let i = 1; i < b.length; i++) {
+        const d = (b[i].c - vw[i]) / atr[i];
+        if (d < -p.k && b[i].c > b[i].o) sig[i] = 1; if (d > p.k && b[i].c < b[i].o) sig[i] = -1;
+        if (b[i].h >= vw[i] && b[i].l <= vw[i]) exit[i] = 2;
+      }
+      return { sig, exit, overlays: [{ name: "VWAP", data: vw, color: "#9aa9ff" }] };
+    },
+  },
+};
+
+/* ============================== Backtest engine ==============================
+   Signals are read on a bar's close and filled at the next bar's open.
+   Stops and targets are checked inside each bar; if both are touched in the same bar the stop is assumed first. */
+function backtest(b, S, R) {
+  const n = b.length, atr = IND.atr(b, R.atrLen);
+  const comm = R.commPct / 100, slip = R.slipPct / 100;
+  let cash = R.capital, pos = null;
+  const trades = [], equity = new Array(n), events = [];
+  let barsIn = 0;
+  const allow = d => R.dir === "both" || (R.dir === "long" && d === 1) || (R.dir === "short" && d === -1);
+
+  function close(i, px, reason) {
+    const fill = px * (1 - pos.dir * slip);
+    const pnl = pos.dir * pos.qty * (fill - pos.entry) - fill * pos.qty * comm;
+    cash += pnl - pos.entryComm;
+    trades.push({ dir: pos.dir, ei: pos.ei, xi: i, entry: pos.entry, exit: fill, qty: pos.qty, pnl: pnl - pos.entryComm, ret: (pnl - pos.entryComm) / pos.eqAtEntry,
+      r: pos.riskAmt ? (pnl - pos.entryComm) / pos.riskAmt : NaN, bars: i - pos.ei, reason, mfe: pos.mfe, mae: pos.mae });
+    events.push({ i, kind: "exit", dir: pos.dir, reason });
+    pos = null;
+  }
+
+  equity[0] = cash;
+  for (let i = 1; i < n; i++) {
+    const bar = b[i], ps = S.sig[i - 1], px = S.exit[i - 1];
+    // 1) exits decided on the previous close
+    if (pos && (px === 2 || px === pos.dir || ps === -pos.dir)) close(i, bar.o, ps === -pos.dir ? "reverse" : "signal");
+    // 2) entries decided on the previous close
+    if (!pos && ps !== 0 && allow(ps) && !isNaN(atr[i - 1])) {
+      const eq = cash, entry = bar.o * (1 + ps * slip);
+      const stopDist = R.stopAtr > 0 ? R.stopAtr * atr[i - 1] : 0;
+      let qty = stopDist > 0 ? (eq * R.riskPct / 100) / stopDist : (eq * R.riskPct / 100) / entry;
+      qty = Math.min(qty, (eq * R.maxLev) / entry);
+      if (qty > 0 && eq > 0) {
+        const ec = entry * qty * comm;
+        pos = { dir: ps, ei: i, entry, qty, entryComm: ec, eqAtEntry: eq, riskAmt: stopDist * qty,
+          stop: stopDist ? entry - ps * stopDist : NaN, tp: stopDist && R.tpR > 0 ? entry + ps * R.tpR * stopDist : NaN, stopDist, mfe: 0, mae: 0, be: false };
+        events.push({ i, kind: "entry", dir: ps });
+        barsIn = 0;
+      }
+    }
+    // 3) intrabar stop / target
+    if (pos) {
+      barsIn++;
+      const d = pos.dir;
+      const fav = d === 1 ? bar.h - pos.entry : pos.entry - bar.l, adv = d === 1 ? pos.entry - bar.l : bar.h - pos.entry;
+      pos.mfe = Math.max(pos.mfe, fav / pos.entry); pos.mae = Math.max(pos.mae, adv / pos.entry);
+      const hitStop = !isNaN(pos.stop) && (d === 1 ? bar.l <= pos.stop : bar.h >= pos.stop);
+      const hitTp = !isNaN(pos.tp) && (d === 1 ? bar.h >= pos.tp : bar.l <= pos.tp);
+      if (hitStop) close(i, d === 1 ? Math.min(bar.o, pos.stop) : Math.max(bar.o, pos.stop), pos.be ? "breakeven" : "stop");
+      else if (hitTp) close(i, d === 1 ? Math.max(bar.o, pos.tp) : Math.min(bar.o, pos.tp), "target");
+      else if (R.maxBars > 0 && barsIn >= R.maxBars) close(i, bar.c, "time");
+      else if (R.beR > 0 && pos.stopDist && !pos.be && fav >= R.beR * pos.stopDist) { pos.stop = pos.entry; pos.be = true; }
+    }
+    equity[i] = cash + (pos ? pos.dir * pos.qty * (bar.c - pos.entry) - pos.entryComm : 0);
+  }
+  if (pos) close(n - 1, b[n - 1].c, "end of data"), equity[n - 1] = cash;
+  return { trades, equity, events, metrics: metrics(b, equity, trades, R.capital) };
+}
+
+function metrics(b, eq, trades, cap) {
+  const n = b.length, fin = eq[n - 1];
+  let peak = cap, mdd = 0, ddStart = 0, longestDD = 0, curStart = 0;
+  const dd = eq.map((e, i) => { if (e >= peak) { peak = e; curStart = i; } const d = (peak - e) / peak; if (d > mdd) mdd = d; longestDD = Math.max(longestDD, i - curStart); return -d * 100; });
+  const rets = []; for (let i = 1; i < n; i++) rets.push(eq[i] / eq[i - 1] - 1);
+  const mean = rets.reduce((a, x) => a + x, 0) / (rets.length || 1);
+  const sd = Math.sqrt(rets.reduce((a, x) => a + (x - mean) ** 2, 0) / (rets.length || 1));
+  const dsd = Math.sqrt(rets.reduce((a, x) => a + Math.min(x, 0) ** 2, 0) / (rets.length || 1));
+  const barSec = n > 1 ? (b[n - 1].t - b[0].t) / (n - 1) : 3600, perYear = 31557600 / barSec;
+  const years = (b[n - 1].t - b[0].t) / 31557600;
+  const wins = trades.filter(t => t.pnl > 0), losses = trades.filter(t => t.pnl <= 0);
+  const gw = wins.reduce((a, t) => a + t.pnl, 0), gl = -losses.reduce((a, t) => a + t.pnl, 0);
+  let streak = 0, maxStreak = 0; for (const t of trades) { streak = t.pnl <= 0 ? streak + 1 : 0; maxStreak = Math.max(maxStreak, streak); }
+  const inMkt = trades.reduce((a, t) => a + t.bars, 0);
+  const rs = trades.filter(t => !isNaN(t.r));
+  return {
+    final: fin, net: fin - cap, netPct: (fin / cap - 1) * 100,
+    cagr: years > 0.05 && fin > 0 ? (Math.pow(fin / cap, 1 / years) - 1) * 100 : NaN,
+    mdd: mdd * 100, ddBars: longestDD, dd,
+    sharpe: sd ? mean / sd * Math.sqrt(perYear) : 0, sortino: dsd ? mean / dsd * Math.sqrt(perYear) : 0,
+    trades: trades.length, winRate: trades.length ? wins.length / trades.length * 100 : 0,
+    pf: gl ? gw / gl : (gw ? Infinity : 0), avgWin: wins.length ? gw / wins.length : 0, avgLoss: losses.length ? -gl / losses.length : 0,
+    expectancy: trades.length ? (gw - gl) / trades.length : 0, avgR: rs.length ? rs.reduce((a, t) => a + t.r, 0) / rs.length : NaN,
+    best: trades.length ? Math.max(...trades.map(t => t.pnl)) : 0, worst: trades.length ? Math.min(...trades.map(t => t.pnl)) : 0,
+    maxLossStreak: maxStreak, exposure: inMkt / n * 100, avgBars: trades.length ? inMkt / trades.length : 0,
+    longs: trades.filter(t => t.dir === 1).length, shorts: trades.filter(t => t.dir === -1).length,
+    bh: (b[n - 1].c / b[0].o - 1) * 100, years,
+  };
+}
+
+/* ============================== Data ============================== */
+function mulberry(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function demoData(nBars, seed) {
+  const rnd = mulberry(seed), gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const out = []; let p = 30000, drift = 0, vol = 0.006, t = Math.floor(Date.UTC(2024, 0, 1) / 1000);
+  for (let i = 0; i < nBars; i++) {
+    if (rnd() < 0.01) drift = (rnd() - 0.5) * 0.002;
+    vol = Math.max(0.002, Math.min(0.02, vol * (1 + gauss() * 0.05)));
+    const hour = (t / 3600) % 24, session = 0.6 + 0.8 * Math.exp(-(((hour - 14) / 4) ** 2));
+    const r = drift + gauss() * vol * session, o = p, c = p * (1 + r);
+    const h = Math.max(o, c) * (1 + Math.abs(gauss()) * vol * 0.5), l = Math.min(o, c) * (1 - Math.abs(gauss()) * vol * 0.5);
+    const v = (800 + Math.abs(gauss()) * 600) * session * (1 + Math.abs(r) / vol * 0.6);
+    const clv = h > l ? (c - l) / (h - l) : 0.5;
+    const bv = v * Math.max(0.05, Math.min(0.95, 0.5 + (clv - 0.5) * 0.6 + gauss() * 0.08));
+    out.push({ t, o, h, l, c, v, bv }); p = c; t += 3600;
+  }
+  return out;
+}
+async function binanceData(host, sym, interval, want) {
+  const url = (end) => `${host}/api/v3/klines?symbol=${encodeURIComponent(sym.toUpperCase())}&interval=${interval}&limit=1000${end ? "&endTime=" + end : ""}`;
+  let all = [], end = null;
+  while (all.length < want) {
+    const r = await fetch(url(end));
+    if (!r.ok) { const txt = await r.text(); throw new Error(`Exchange answered ${r.status}: ${txt.slice(0, 120)}`); }
+    const k = await r.json(); if (!k.length) break;
+    all = k.concat(all); end = k[0][0] - 1; if (k.length < 1000) break;
+  }
+  const now = Date.now();
+  return all.slice(-want).filter(k => k[6] < now) // drop the still-forming bar
+    .map(k => ({ t: Math.floor(k[0] / 1000), o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5], bv: +k[9] }));
+}
+/* Accepts unix seconds/ms, ISO dates, "YYYY-MM-DD HH:MM", and NinjaTrader "YYYYMMDD HHMMSS". Times are read as UTC. */
+function parseTime(raw) {
+  if (/^\d+(\.\d+)?$/.test(raw)) { const n = +raw; if (n > 1e12) return n / 1000; if (n > 1e9) return n;
+    if (/^\d{8}$/.test(raw)) return Date.UTC(+raw.slice(0, 4), +raw.slice(4, 6) - 1, +raw.slice(6, 8)) / 1000; return NaN; }
+  const nt = raw.match(/^(\d{4})(\d{2})(\d{2})[ T](\d{2}):?(\d{2}):?(\d{2})?/);
+  if (nt) return Date.UTC(+nt[1], +nt[2] - 1, +nt[3], +nt[4], +nt[5], +(nt[6] || 0)) / 1000;
+  const iso = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(raw) ? raw.replace(" ", "T") + "Z" : raw;
+  return Date.parse(iso) / 1000;
+}
+function parseCsv(text) {
+  const lines = text.trim().split(/\r?\n/); if (lines.length < 3) throw new Error("The file has fewer than three rows.");
+  const sep = lines[0].includes(";") && !lines[0].includes(",") ? ";" : lines[0].includes("\t") ? "\t" : ",";
+  const head = lines[0].split(sep).map(h => h.trim().toLowerCase().replace(/["']/g, ""));
+  const find = (...names) => head.findIndex(h => names.some(n => h === n || h.startsWith(n)));
+  const it = find("time", "date", "timestamp", "datetime", "open time"), io = find("open"), ih = find("high"), il = find("low"), ic = find("close", "adj close"), iv = find("volume", "vol");
+  const ib = head.findIndex(h => /buy|taker|ask/.test(h));
+  if ([it, io, ih, il, ic].some(x => x < 0)) throw new Error("Couldn't find time, open, high, low and close columns. Found: " + head.join(", "));
+  const out = [];
+  for (let r = 1; r < lines.length; r++) {
+    const c = lines[r].split(sep).map(x => x.trim().replace(/["']/g, "")); if (c.length < head.length - 1) continue;
+    const t = parseTime(c[it]); if (isNaN(t)) continue;
+    const o = +c[io], h = +c[ih], l = +c[il], cl = +c[ic], v = iv >= 0 ? +c[iv] || 0 : 1;
+    if ([o, h, l, cl].some(isNaN)) continue;
+    const bv = ib >= 0 && !isNaN(+c[ib]) ? +c[ib] : v * (h > l ? (cl - l) / (h - l) : 0.5);
+    out.push({ t: Math.floor(t), o, h, l, c: cl, v, bv });
+  }
+  out.sort((a, b) => a.t - b.t);
+  const dedup = out.filter((x, i) => i === 0 || x.t !== out[i - 1].t);
+  if (dedup.length < 50) throw new Error("Fewer than 50 valid rows were read from the file.");
+  return dedup;
+}
+
+/* ============================== UI state ============================== */
+const $ = id => document.getElementById(id);
+const store = { get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+const st = { bars: [], label: "", src: "demo", result: null, sres: null, replayEnd: null, live: null, lastAlertT: 0, liveCfg: null };
+const fmt = (x, d = 2) => isFinite(x) ? x.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : (x === Infinity ? "∞" : "–");
+const money = x => (x < 0 ? "−" : "") + "$" + fmt(Math.abs(x));
+const pct = (x, d = 2) => (x > 0 ? "+" : "") + fmt(x, d) + "%";
+const tstr = t => new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ");
+const cls = x => x > 0 ? "pos" : x < 0 ? "neg" : "";
+
+/* strategy controls */
+for (const [k, s] of Object.entries(STRATS)) $("stratSel").add(new Option(s.name, k));
+function renderParams(vals) {
+  const s = STRATS[$("stratSel").value]; $("stratDesc").textContent = s.desc;
+  $("stratParams").innerHTML = s.params.map(p => `<label class="f">${p.l}<input id="p_${p.k}" type="number" value="${vals?.[p.k] ?? p.d}" min="${p.min}" max="${p.max}" step="${p.s}"></label>`).join("");
+  const ox = $("optX"), oy = $("optY"); ox.innerHTML = oy.innerHTML = "";
+  s.params.forEach(p => { ox.add(new Option(p.l, p.k)); oy.add(new Option(p.l, p.k)); });
+  oy.add(new Option("Stop (× ATR)", "_stopAtr")); oy.add(new Option("Target (R)", "_tpR")); ox.add(new Option("Stop (× ATR)", "_stopAtr")); ox.add(new Option("Target (R)", "_tpR"));
+  oy.selectedIndex = s.params.length > 1 ? 1 : s.params.length; fillOptRange();
+}
+function paramDef(key) { if (key === "_stopAtr") return { d: 2, min: 0.5, max: 4, s: 0.5 }; if (key === "_tpR") return { d: 2, min: 0.5, max: 4, s: 0.5 }; return STRATS[$("stratSel").value].params.find(p => p.k === key); }
+function fillOptRange() {
+  for (const ax of ["X", "Y"]) {
+    const p = paramDef($("opt" + ax).value); if (!p) continue;
+    const span = p.max - p.min, lo = Math.max(p.min, p.d - span * 0.25), hi = Math.min(p.max, p.d + span * 0.25);
+    const step = p.s >= 1 ? Math.max(1, Math.round((hi - lo) / 8)) : +((hi - lo) / 8).toFixed(2) || p.s;
+    $("opt" + ax + "min").value = +lo.toFixed(2); $("opt" + ax + "max").value = +hi.toFixed(2); $("opt" + ax + "step").value = step;
+  }
+}
+$("stratSel").onchange = () => { renderParams(); runAll(); };
+$("optX").onchange = $("optY").onchange = fillOptRange;
+
+function readParams() { const s = STRATS[$("stratSel").value], o = {}; s.params.forEach(p => { const v = parseFloat($("p_" + p.k).value); o[p.k] = isNaN(v) ? p.d : v; }); return o; }
+function readRisk() {
+  const g = (id, d) => { const v = parseFloat($(id).value); return isNaN(v) ? d : v; };
+  return { capital: g("capital", 10000), riskPct: g("riskPct", 1), stopAtr: g("stopAtr", 2), tpR: g("tpR", 2), atrLen: Math.max(2, Math.round(g("atrLen", 14))),
+    maxBars: Math.round(g("maxBars", 0)), commPct: g("commPct", 0), slipPct: g("slipPct", 0), maxLev: g("maxLev", 1), beR: g("beR", 0), dir: $("dirSel").value };
+}
+
+/* ============================== Charts ============================== */
+const C = { up: "#3fb6a0", down: "#e0665a", brass: "#e0a943", muted: "#8193a3", line: "#24323f", text: "#d6dee6", panel: "#151f2b" };
+const LW = window.LightweightCharts;
+const chartOpts = { autoSize: true, layout: { background: { color: C.panel }, textColor: C.muted, fontFamily: "IBM Plex Mono, monospace", fontSize: 11 },
+  grid: { vertLines: { color: "rgba(36,50,63,.6)" }, horzLines: { color: "rgba(36,50,63,.6)" } }, rightPriceScale: { borderColor: C.line },
+  timeScale: { borderColor: C.line, timeVisible: true, secondsVisible: false }, crosshair: { mode: 0 } };
+let priceChart, flowChart, eqChart, candles, overlaySeries = [], deltaHist, cumLine, eqLine, bhLine, ddArea;
+function initCharts() {
+  if (!LW) { $("priceChart").innerHTML = `<p class="err" style="padding:12px">The chart library could not load (no internet?). Results tables still work.</p>`; return; }
+  priceChart = LW.createChart($("priceChart"), chartOpts);
+  candles = priceChart.addCandlestickSeries({ upColor: C.up, downColor: C.down, wickUpColor: C.up, wickDownColor: C.down, borderVisible: false });
+  flowChart = LW.createChart($("flowChart"), { ...chartOpts, timeScale: { ...chartOpts.timeScale, visible: false } });
+  deltaHist = flowChart.addHistogramSeries({ priceScaleId: "right", priceFormat: { type: "volume" } });
+  cumLine = flowChart.addLineSeries({ color: C.brass, lineWidth: 1, priceScaleId: "left", priceLineVisible: false, lastValueVisible: false });
+  flowChart.priceScale("left").applyOptions({ visible: false });
+  eqChart = LW.createChart($("equityChart"), chartOpts);
+  ddArea = eqChart.addHistogramSeries({ priceScaleId: "left", color: "rgba(224,102,90,.45)", base: 0, priceFormat: { type: "percent" }, priceLineVisible: false, lastValueVisible: false });
+  eqChart.priceScale("left").applyOptions({ visible: true, borderColor: C.line, scaleMargins: { top: 0.72, bottom: 0.02 } });
+  eqChart.priceScale("right").applyOptions({ scaleMargins: { top: 0.05, bottom: 0.32 } });
+  bhLine = eqChart.addLineSeries({ color: C.muted, lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
+  eqLine = eqChart.addLineSeries({ color: C.brass, lineWidth: 2 });
+  let syncing = false;
+  const sync = (src, dst) => src.timeScale().subscribeVisibleLogicalRangeChange(r => { if (syncing || !r) return; syncing = true; dst.forEach(d => d.timeScale().setVisibleLogicalRange(r)); syncing = false; });
+  sync(priceChart, [flowChart]); sync(flowChart, [priceChart]);
+}
+function flowColor(s) { return s === 2 ? "#3fd6b8" : s === 1 ? "#2c7f71" : s === -1 ? "#9a4840" : s === -2 ? "#ff7a6b" : "#6c7b88"; }
+
+function drawPrice(end) {
+  if (!priceChart) return;
+  const b = st.bars.slice(0, end), r = st.sres, f = flowFeatures(b);
+  const useFlow = $("flowBars").checked;
+  candles.setData(b.map((x, i) => {
+    const d = { time: x.t, open: x.o, high: x.h, low: x.l, close: x.c };
+    if (useFlow) { const col = flowColor(flowState(b, f, i)); d.color = col; d.wickColor = col; }
+    return d;
+  }));
+  overlaySeries.forEach(s => priceChart.removeSeries(s)); overlaySeries = [];
+  $("priceLegend").innerHTML = r.overlays.map(o => `<span><i style="background:${o.color}"></i>${o.name}</span>`).join("") +
+    (useFlow ? `<span><i style="background:#3fd6b8"></i>strong buy</span><span><i style="background:#ff7a6b"></i>strong sell</span><span><i style="background:#6c7b88"></i>balanced</span>` : "");
+  for (const o of r.overlays) {
+    const s = priceChart.addLineSeries({ color: o.color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+    s.setData(b.map((x, i) => isFinite(o.data[i]) ? { time: x.t, value: o.data[i] } : { time: x.t }));
+    overlaySeries.push(s);
+  }
+  const marks = [];
+  for (const t of st.result.trades) {
+    if (t.ei < end) marks.push({ time: b[t.ei].t, position: t.dir === 1 ? "belowBar" : "aboveBar", color: t.dir === 1 ? C.up : C.down, shape: t.dir === 1 ? "arrowUp" : "arrowDown", text: t.dir === 1 ? "L" : "S" });
+    if (t.xi < end) marks.push({ time: b[t.xi].t, position: t.dir === 1 ? "aboveBar" : "belowBar", color: t.pnl > 0 ? C.brass : C.muted, shape: "circle", text: "" });
+  }
+  marks.sort((a, z) => a.time - z.time); candles.setMarkers(marks);
+  deltaHist.setData(b.map((x, i) => ({ time: x.t, value: f.delta[i], color: f.delta[i] >= 0 ? "rgba(63,182,160,.75)" : "rgba(224,102,90,.75)" })));
+  cumLine.setData(b.map((x, i) => ({ time: x.t, value: f.cum[i] })));
+}
+function drawEquity() {
+  if (!eqChart) return;
+  const b = st.bars, r = st.result, cap = readRisk().capital, k = cap / b[0].o;
+  eqLine.setData(b.map((x, i) => ({ time: x.t, value: r.equity[i] })));
+  bhLine.setData(b.map(x => ({ time: x.t, value: k * x.c })));
+  ddArea.setData(b.map((x, i) => ({ time: x.t, value: r.metrics.dd[i] })));
+  eqChart.timeScale().fitContent();
+}
+
+/* ============================== Rendering results ============================== */
+function renderKpis(m) {
+  const k = [
+    ["Net profit", money(m.net), cls(m.net)], ["Return", pct(m.netPct), cls(m.netPct)], ["Buy & hold", pct(m.bh), cls(m.bh)],
+    ["Max drawdown", "−" + fmt(m.mdd) + "%", m.mdd > 0 ? "neg" : ""], ["Profit factor", fmt(m.pf), m.pf >= 1 ? "pos" : "neg"],
+    ["Win rate", fmt(m.winRate, 1) + "%", ""], ["Trades", String(m.trades), ""], ["Sharpe", fmt(m.sharpe), cls(m.sharpe)],
+  ];
+  $("kpis").innerHTML = k.map(([a, v, c]) => `<div class="kpi"><div class="k">${a}</div><div class="v ${c}">${v}</div></div>`).join("");
+}
+function renderTrades(trades) {
+  const b = st.bars;
+  $("tradeTable").innerHTML = `<thead><tr><th>#</th><th>Side</th><th>Entry time</th><th>Entry</th><th>Exit time</th><th>Exit</th><th>Size</th><th>P&amp;L</th><th>Return</th><th>R</th><th>Bars</th><th>MFE</th><th>MAE</th><th>Exit reason</th></tr></thead><tbody>` +
+    trades.slice().reverse().map((t, j) => `<tr class="click" data-i="${t.ei}"><td>${trades.length - j}</td><td><span class="pill ${t.dir === 1 ? "pos" : "neg"}">${t.dir === 1 ? "Long" : "Short"}</span></td>
+      <td>${tstr(b[t.ei].t)}</td><td>${fmt(t.entry, priceDp())}</td><td>${tstr(b[t.xi].t)}</td><td>${fmt(t.exit, priceDp())}</td><td>${fmt(t.qty, 4)}</td>
+      <td class="${cls(t.pnl)}">${money(t.pnl)}</td><td class="${cls(t.ret)}">${pct(t.ret * 100)}</td><td class="${cls(t.r)}">${isNaN(t.r) ? "–" : fmt(t.r)}</td>
+      <td>${t.bars}</td><td>${fmt(t.mfe * 100)}%</td><td>${fmt(t.mae * 100)}%</td><td>${t.reason}</td></tr>`).join("") + `</tbody>` +
+    (trades.length ? "" : `<tbody><tr><td colspan="14" style="text-align:left;color:var(--muted)">No trades. Loosen the setup thresholds or change direction.</td></tr></tbody>`);
+}
+function priceDp() { const p = st.bars[st.bars.length - 1]?.c || 1; return p < 1 ? 5 : p < 20 ? 4 : 2; }
+$("tradeTable").onclick = e => { const tr = e.target.closest("tr[data-i]"); if (!tr || !priceChart) return; const i = +tr.dataset.i; priceChart.timeScale().setVisibleLogicalRange({ from: i - 60, to: i + 60 }); $("priceChart").scrollIntoView({ behavior: "smooth", block: "center" }); };
+
+function renderStats(m) {
+  const rows = [
+    ["Starting capital", money(readRisk().capital)], ["Ending equity", money(m.final)], ["Net profit", money(m.net)], ["Annualised return (CAGR)", isNaN(m.cagr) ? "–" : pct(m.cagr)],
+    ["Max drawdown", "−" + fmt(m.mdd) + "%"], ["Longest drawdown", m.ddBars + " bars"], ["Return ÷ drawdown", fmt(m.mdd ? m.netPct / m.mdd : 0)],
+    ["Sharpe ratio", fmt(m.sharpe)], ["Sortino ratio", fmt(m.sortino)], ["Total trades", m.trades], ["Longs / shorts", m.longs + " / " + m.shorts],
+    ["Win rate", fmt(m.winRate, 1) + "%"], ["Profit factor", fmt(m.pf)], ["Average win", money(m.avgWin)], ["Average loss", money(m.avgLoss)],
+    ["Payoff ratio", fmt(m.avgLoss ? -m.avgWin / m.avgLoss : 0)], ["Expectancy / trade", money(m.expectancy)], ["Average R multiple", isNaN(m.avgR) ? "–" : fmt(m.avgR)],
+    ["Best trade", money(m.best)], ["Worst trade", money(m.worst)], ["Max losing streak", m.maxLossStreak], ["Time in market", fmt(m.exposure, 1) + "%"],
+    ["Average bars held", fmt(m.avgBars, 1)], ["Buy & hold return", pct(m.bh)], ["Test span", fmt(m.years * 365.25, 0) + " days"],
+  ];
+  $("statGrid").innerHTML = rows.map(([a, v]) => `<div><span>${a}</span><span>${v}</span></div>`).join("");
+  // monthly returns table
+  const eq = st.result.equity, b = st.bars, months = new Map();
+  for (let i = 0; i < b.length; i++) { const d = new Date(b[i].t * 1000), y = d.getUTCFullYear(), mo = d.getUTCMonth(); const key = y * 12 + mo;
+    if (!months.has(key)) months.set(key, { y, mo, start: i ? eq[i - 1] : eq[0], end: eq[i] }); months.get(key).end = eq[i]; }
+  const years = [...new Set([...months.values()].map(x => x.y))];
+  const M = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  $("monthTable").innerHTML = `<thead><tr><th>Year</th>${M.map(m => `<th>${m}</th>`).join("")}<th>Year</th></tr></thead><tbody>` + years.map(y => {
+    let yStart = null, yEnd = null;
+    const cells = M.map((_, mo) => { const r = months.get(y * 12 + mo); if (!r) return "<td></td>"; yStart ??= r.start; yEnd = r.end; const v = (r.end / r.start - 1) * 100; return `<td class="${cls(v)}">${fmt(v, 1)}</td>`; }).join("");
+    const yv = (yEnd / yStart - 1) * 100; return `<tr><td>${y}</td>${cells}<td class="${cls(yv)}">${fmt(yv, 1)}</td></tr>`;
+  }).join("") + "</tbody>";
+}
+
+function renderSignals() {
+  const b = st.bars, ev = st.result.events.slice(-80).reverse();
+  $("sigList").innerHTML = ev.length ? ev.map(e => `<div><span>${tstr(b[e.i].t)}</span><span class="${e.dir === 1 ? "pos" : "neg"}">${e.kind === "entry" ? (e.dir === 1 ? "BUY" : "SELL") : "EXIT " + (e.dir === 1 ? "long" : "short")}</span><span>${fmt(b[e.i].o, priceDp())}</span><span style="color:var(--muted)">${e.reason || ""}</span></div>`).join("")
+    : `<div style="color:var(--muted)">No signals in this data yet.</div>`;
+}
+
+/* ============================== Run ============================== */
+function runAll() {
+  if (!st.bars.length) return;
+  const S = STRATS[$("stratSel").value], P = readParams(), R = readRisk();
+  st.sres = S.run(st.bars, P); st.result = backtest(st.bars, st.sres, R);
+  renderKpis(st.result.metrics); renderTrades(st.result.trades); renderStats(st.result.metrics); renderSignals();
+  drawPrice(st.replayEnd ?? st.bars.length); drawEquity();
+  if (st.replayEnd == null && priceChart) priceChart.timeScale().setVisibleLogicalRange({ from: st.bars.length - 250, to: st.bars.length + 5 });
+  store.set("fd_last", { strat: $("stratSel").value, params: P, risk: R });
+}
+$("runBtn").onclick = runAll;
+$("flowBars").onchange = () => st.result && drawPrice(st.replayEnd ?? st.bars.length);
+document.querySelector(".rail").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.tagName === "INPUT") runAll(); });
+
+/* data source */
+document.querySelectorAll("[data-src]").forEach(btn => btn.onclick = () => {
+  st.src = btn.dataset.src; document.querySelectorAll("[data-src]").forEach(x => x.setAttribute("aria-pressed", x === btn));
+  $("srcDemo").hidden = st.src !== "demo"; $("srcBinance").hidden = st.src !== "binance"; $("srcCsv").hidden = st.src !== "csv";
+});
+function setBars(bars, label) { st.bars = bars; st.label = label; st.replayEnd = null; $("datasetLabel").textContent = `${label} · ${bars.length.toLocaleString()} bars · ${tstr(bars[0].t)} → ${tstr(bars[bars.length - 1].t)} UTC`; $("rpSlider").max = bars.length; $("rpSlider").value = bars.length; runAll(); }
+function showErr(msg) { $("dataErr").textContent = msg; $("dataErr").hidden = !msg; }
+$("loadBtn").onclick = async () => {
+  showErr("");
+  try {
+    if (st.src === "demo") setBars(demoData(Math.min(20000, Math.max(200, +$("demoBars").value || 3000)), +$("demoSeed").value || 1), "Sample data (synthetic)");
+    else if (st.src === "binance") {
+      $("loadBtn").textContent = "Loading…"; const sym = $("bnSymbol").value.trim() || "BTCUSDT", iv = $("bnInterval").value;
+      const bars = await binanceData($("bnHost").value, sym, iv, Math.min(20000, +$("bnBars").value || 3000));
+      if (bars.length < 50) throw new Error("The exchange returned too few bars for " + sym + ".");
+      setBars(bars, `${sym.toUpperCase()} ${iv} · ${$("bnHost").selectedOptions[0].text}`);
+      st.liveCfg = { host: $("bnHost").value, sym, iv, n: bars.length };
+    } else {
+      const f = $("csvFile").files[0]; if (!f) throw new Error("Choose a CSV file first.");
+      setBars(parseCsv(await f.text()), f.name);
+    }
+  } catch (e) {
+    showErr(st.src === "binance" && e instanceof TypeError ? "Couldn't reach the exchange. If you're viewing this inside a hosted page, downloads are blocked there: open index.html directly in your browser. In the US, try binance.us." : e.message);
+  } finally { $("loadBtn").textContent = "Load data"; }
+};
+
+/* presets */
+function refreshPresets() { const ps = store.get("fd_presets", {}); $("presetSel").innerHTML = `<option value="">Presets…</option>` + Object.keys(ps).map(k => `<option>${k.replace(/</g, "&lt;")}</option>`).join(""); }
+$("savePreset").onclick = () => {
+  const ps = store.get("fd_presets", {}), name = `${STRATS[$("stratSel").value].name} #${Object.keys(ps).length + 1}`;
+  ps[name] = { strat: $("stratSel").value, params: readParams(), risk: readRisk() }; store.set("fd_presets", ps); refreshPresets(); toast("Saved preset: " + name);
+};
+$("presetSel").onchange = () => { const p = store.get("fd_presets", {})[$("presetSel").value]; if (p) applyConfig(p); $("presetSel").value = ""; };
+function applyConfig(p) {
+  if (!STRATS[p.strat]) return; $("stratSel").value = p.strat; renderParams(p.params);
+  const r = p.risk || {}; for (const k of ["capital", "riskPct", "stopAtr", "tpR", "atrLen", "maxBars", "commPct", "slipPct", "maxLev", "beR"]) if (r[k] != null) $(k).value = r[k];
+  if (r.dir) $("dirSel").value = r.dir; runAll();
+}
+
+/* trades csv */
+function tradesCsv() {
+  const b = st.bars; return "side,entry_time,entry_price,exit_time,exit_price,qty,pnl,return_pct,r_multiple,bars,exit_reason\n" +
+    st.result.trades.map(t => [t.dir === 1 ? "long" : "short", tstr(b[t.ei].t), t.entry, tstr(b[t.xi].t), t.exit, t.qty, t.pnl.toFixed(2), (t.ret * 100).toFixed(3), isNaN(t.r) ? "" : t.r.toFixed(3), t.bars, t.reason].join(",")).join("\n");
+}
+$("copyCsv").onclick = () => { const txt = tradesCsv(); navigator.clipboard.writeText(txt).then(() => $("copyMsg").textContent = "Copied " + st.result.trades.length + " trades.", () => $("copyMsg").textContent = "Copy was blocked here. Use Download instead."); };
+$("dlCsv").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([tradesCsv()], { type: "text/csv" })); a.download = "trades.csv"; a.click(); $("copyMsg").textContent = "If nothing downloaded, use Copy instead."; };
+
+/* tabs */
+document.querySelectorAll("[data-tab]").forEach(t => t.onclick = () => {
+  document.querySelectorAll("[data-tab]").forEach(x => x.setAttribute("aria-selected", x === t));
+  document.querySelectorAll("[data-panel]").forEach(p => p.hidden = p.dataset.panel !== t.dataset.tab);
+});
+
+/* ============================== Optimizer ============================== */
+function range(a, z, s) { const o = []; if (!(s > 0)) return [a]; for (let v = a; v <= z + 1e-9 && o.length < 60; v += s) o.push(+v.toFixed(6)); return o; }
+function score(m, obj) { if (m.trades < 5) return -Infinity; return obj === "net" ? m.netPct : obj === "sharpe" ? m.sharpe : obj === "pf" ? (isFinite(m.pf) ? m.pf : 10) : (m.mdd ? m.netPct / m.mdd : m.netPct); }
+$("optRun").onclick = async () => {
+  if (!st.bars.length) return;
+  const kx = $("optX").value, ky = $("optY").value, xs = range(+$("optXmin").value, +$("optXmax").value, +$("optXstep").value), ys = range(+$("optYmin").value, +$("optYmax").value, +$("optYstep").value);
+  if (xs.length * ys.length > 900) { $("optMsg").textContent = `That is ${xs.length * ys.length} combinations; widen the steps to stay under 900.`; return; }
+  const S = STRATS[$("stratSel").value], base = readParams(), R0 = readRisk(), obj = $("optObj").value;
+  const split = Math.floor(st.bars.length * Math.min(100, Math.max(10, +$("optIS").value || 70)) / 100);
+  const isBars = st.bars.slice(0, split), oosBars = st.bars.slice(Math.max(0, split - 400)); // OOS keeps 400 bars of warm-up
+  const res = []; $("optMsg").textContent = "Running…"; await new Promise(r => setTimeout(r, 20));
+  const t0 = performance.now();
+  for (const x of xs) for (const y of ys) {
+    const P = { ...base }, R = { ...R0 };
+    for (const [k, v] of [[kx, x], [ky, y]]) { if (k === "_stopAtr") R.stopAtr = v; else if (k === "_tpR") R.tpR = v; else P[k] = v; }
+    const mIS = backtest(isBars, S.run(isBars, P), R).metrics;
+    let mOOS = null;
+    if (split < st.bars.length - 50) { const r = backtest(oosBars, S.run(oosBars, P), R); mOOS = r.metrics; }
+    res.push({ x, y, P, R, m: mIS, oos: mOOS, s: score(mIS, obj) });
+  }
+  res.sort((a, b) => b.s - a.s);
+  $("optMsg").textContent = `${res.length} runs in ${((performance.now() - t0) / 1000).toFixed(1)} s. In-sample ${isBars.length} bars${split < st.bars.length - 50 ? `, out-of-sample ${st.bars.length - split} bars` : ""}.`;
+  const lx = $("optX").selectedOptions[0].text, ly = $("optY").selectedOptions[0].text;
+  $("optTable").innerHTML = `<thead><tr><th>${lx}</th><th>${ly}</th><th>Score</th><th>IS return</th><th>IS max DD</th><th>IS PF</th><th>IS trades</th><th>OOS return</th><th>OOS max DD</th><th>OOS PF</th></tr></thead><tbody>` +
+    res.slice(0, 50).map((r, i) => `<tr class="click" data-k="${i}"><td>${r.x}</td><td>${r.y}</td><td>${fmt(r.s)}</td><td class="${cls(r.m.netPct)}">${pct(r.m.netPct)}</td><td>${fmt(r.m.mdd)}%</td><td>${fmt(r.m.pf)}</td><td>${r.m.trades}</td>
+      <td class="${r.oos ? cls(r.oos.netPct) : ""}">${r.oos ? pct(r.oos.netPct) : "–"}</td><td>${r.oos ? fmt(r.oos.mdd) + "%" : "–"}</td><td>${r.oos ? fmt(r.oos.pf) : "–"}</td></tr>`).join("") + "</tbody>";
+  // heatmap of in-sample net %
+  const vals = res.map(r => r.m.netPct), mx = Math.max(1e-9, ...vals.map(Math.abs));
+  const byKey = new Map(res.map(r => [r.x + "|" + r.y, r]));
+  const heat = $("optHeat"); heat.style.gridTemplateColumns = `auto repeat(${xs.length}, minmax(38px, 1fr))`;
+  heat.innerHTML = `<div class="ax">${ly} \\ ${lx}</div>` + xs.map(x => `<div class="ax">${x}</div>`).join("") + ys.map(y => `<div class="ax">${y}</div>` + xs.map(x => {
+    const r = byKey.get(x + "|" + y), v = r.m.netPct, a = Math.min(1, Math.abs(v) / mx) * 0.85 + 0.08;
+    return `<div data-k="${res.indexOf(r)}" title="${lx} ${x}, ${ly} ${y}: ${pct(v)} in-sample" style="background:${v >= 0 ? `rgba(63,182,160,${a})` : `rgba(224,102,90,${a})`};color:${a > .5 ? "#0f1620" : "var(--text)"}">${fmt(v, 0)}</div>`;
+  }).join("")).join("");
+  const pick = e => { const el = e.target.closest("[data-k]"); if (!el) return; const r = res[+el.dataset.k]; applyConfig({ strat: $("stratSel").value, params: r.P, risk: r.R }); toast(`Loaded ${lx} ${r.x}, ${ly} ${r.y}`); };
+  $("optTable").onclick = heat.onclick = pick;
+};
+
+/* ============================== Replay & live alerts ============================== */
+let audio;
+function beep(dir) {
+  if (!$("soundOn").checked) return;
+  try { audio ??= new (window.AudioContext || window.webkitAudioContext)(); const o = audio.createOscillator(), g = audio.createGain();
+    o.frequency.value = dir === 1 ? 880 : 440; o.type = "triangle"; g.gain.setValueAtTime(0.0001, audio.currentTime); g.gain.exponentialRampToValueAtTime(0.25, audio.currentTime + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.5);
+    o.connect(g).connect(audio.destination); o.start(); o.stop(audio.currentTime + 0.55); } catch {}
+}
+function toast(msg, dir) { const d = document.createElement("div"); d.className = "toast " + (dir === 1 ? "long" : dir === -1 ? "short" : ""); d.textContent = msg; $("toasts").appendChild(d); setTimeout(() => d.remove(), 6000); }
+function replayTo(k) {
+  k = Math.max(50, Math.min(st.bars.length, k)); const prev = st.replayEnd ?? st.bars.length; st.replayEnd = k; $("rpSlider").value = k; drawPrice(k);
+  if (priceChart) priceChart.timeScale().setVisibleLogicalRange({ from: k - 150, to: k + 10 });
+  if (k > prev) { const s = st.sres.sig[k - 1]; if (s) { const b = st.bars[k - 1]; toast(`${s === 1 ? "BUY" : "SELL"} setup on bar close ${tstr(b.t)} at ${fmt(b.c, priceDp())}`, s); beep(s); } }
+}
+let playTimer = null;
+$("rpPlay").onclick = () => {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; $("rpPlay").textContent = "Play"; return; }
+  if ((st.replayEnd ?? st.bars.length) >= st.bars.length) replayTo(Math.max(50, st.bars.length - 300));
+  $("rpPlay").textContent = "Pause";
+  playTimer = setInterval(() => { if ((st.replayEnd ?? 0) >= st.bars.length) { $("rpPlay").click(); return; } replayTo(st.replayEnd + 1); }, +$("rpSpeed").value);
+};
+$("rpStep").onclick = () => replayTo((st.replayEnd ?? st.bars.length - 1) + 1);
+$("rpSlider").oninput = e => replayTo(+e.target.value);
+$("rpExit").onclick = () => { if (playTimer) $("rpPlay").click(); st.replayEnd = null; drawPrice(st.bars.length); priceChart?.timeScale().setVisibleLogicalRange({ from: st.bars.length - 250, to: st.bars.length + 5 }); };
+
+$("liveBtn").onclick = () => {
+  if (st.live) { clearInterval(st.live); st.live = null; $("liveBtn").textContent = "Start live watch"; $("liveBtn").classList.remove("on"); $("liveMsg").textContent = "Live watch stopped."; return; }
+  if (!st.liveCfg) { $("liveMsg").textContent = "Load Binance data first; live watch follows that symbol and interval."; return; }
+  beep(1); // unlock audio from the click
+  st.lastAlertT = st.bars[st.bars.length - 1].t;
+  const tick = async () => {
+    try {
+      const c = st.liveCfg, bars = await binanceData(c.host, c.sym, c.iv, c.n);
+      const newLast = bars[bars.length - 1].t; $("liveMsg").textContent = `Last check ${new Date().toLocaleTimeString()} · last closed bar ${tstr(newLast)} UTC`;
+      if (newLast === st.bars[st.bars.length - 1].t) return;
+      setBars(bars, st.label);
+      const i = bars.length - 1, s = st.sres.sig[i];
+      if (s && bars[i].t > st.lastAlertT) { st.lastAlertT = bars[i].t; toast(`LIVE ${c.sym.toUpperCase()} ${c.iv}: ${s === 1 ? "BUY" : "SELL"} setup at ${fmt(bars[i].c, priceDp())}`, s); beep(s);
+        try { if (window.Notification?.permission === "granted") new Notification(`${c.sym} ${s === 1 ? "BUY" : "SELL"} setup`, { body: STRATS[$("stratSel").value].name }); } catch {} }
+    } catch (e) { $("liveMsg").textContent = "Live check failed: " + e.message; }
+  };
+  try { window.Notification?.requestPermission?.(); } catch {}
+  st.live = setInterval(tick, 30000); tick();
+  $("liveBtn").textContent = "Stop live watch"; $("liveBtn").classList.add("on"); $("liveMsg").textContent = "Watching… checks every 30 s.";
+};
+
+/* ============================== Boot ============================== */
+initCharts(); refreshPresets();
+const last = store.get("fd_last", null);
+if (last && STRATS[last.strat]) { $("stratSel").value = last.strat; renderParams(last.params); const r = last.risk || {}; for (const k of Object.keys(r)) if ($(k) && k !== "dir") $(k).value = r[k]; if (r.dir) $("dirSel").value = r.dir; }
+else renderParams();
+setBars(demoData(3000, 7), "Sample data (synthetic)");
+</script>
