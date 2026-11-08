@@ -1,0 +1,263 @@
+//@version=5
+// =====================================================================================
+//  Overnight Range Hunt
+// -------------------------------------------------------------------------------------
+//  Idea: the RTH session tends to go after the overnight (Globex) extreme that sits on
+//  the same side of the overnight midpoint as the RTH open.
+//    - RTH opens in the UPPER half (Mid < Open < High) -> LONG,  target = OVN High
+//    - RTH opens in the LOWER half (Low < Open < Mid)  -> SHORT, target = OVN Low
+//    - Open exactly at Mid, or outside the overnight range -> no trade
+//  Stop = beyond the extreme of the first X minutes of RTH (+ tick buffer).
+//  Maximum ONE trade per trading day.
+//
+//  Built for NQ on a 1-minute chart, but works on any intraday market/timeframe.
+//
+//  Backtest note: on historical bars Pine fills market orders at the NEXT bar's open,
+//  so the backtest entry is the open of the 2nd RTH bar (09:31 on a 1-min chart).
+//  In real time, calc_on_every_tick lets the order go out on the first tick of 09:30.
+// =====================================================================================
+strategy("Overnight Range Hunt", overlay=true, calc_on_every_tick=true,
+     initial_capital=100000, default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, commission_value=2.0,
+     slippage=1, max_labels_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+grpS = "Sessions"
+ovnSessIn = input.session("1800-0930", "Overnight (Globex) Session", group=grpS,
+     tooltip="End time is exclusive: 1800-0930 includes bars from 18:00 through the 09:29 bar.")
+rthSessIn = input.session("0930-1600", "RTH Session", group=grpS)
+tz        = input.string("America/New_York", "Session Time Zone", group=grpS)
+
+grpR = "Risk / Trade"
+stopWinIn   = input.string("1", "Stop Loss Candle Length (minutes)", options=["1", "5", "15"], group=grpR,
+     tooltip="Stop goes beyond the high (short) / low (long) of the first X minutes of RTH. If the chart timeframe is larger than this, the first RTH bar is used.")
+bufTicks    = input.int(4, "Stop Loss Buffer (ticks)", minval=0, group=grpR)
+safetyPts   = input.float(0.0, "Safety Stop While Opening Window Forms (points, 0 = off)", minval=0, group=grpR,
+     tooltip="The real stop is only known once the opening window closes. With a 5/15-min window you may want a hard stop (distance from RTH open) until then.")
+flatAtClose = input.bool(true, "Flatten Position at RTH Close", group=grpR)
+
+grpV = "Visuals"
+showBg    = input.bool(true, "Shade Upper (green) / Lower (red) Half", group=grpV)
+showLbl   = input.bool(true, "Show Daily Bias Label", group=grpV)
+showTable = input.bool(true, "Show Stats Dashboard", group=grpV)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+if timeframe.isdwm
+    runtime.error("Overnight Range Hunt needs an intraday chart (1-minute recommended).")
+
+// Force all 7 days so the Sunday-evening Globex open is included.
+withDays(s) => str.contains(s, ":") ? s : s + ":1234567"
+ovnSess = withDays(ovnSessIn)
+rthSess = withDays(rthSessIn)
+
+inOvn = not na(time(timeframe.period, ovnSess, tz))
+inRth = not na(time(timeframe.period, rthSess, tz))
+
+newOvn      = inOvn and not inOvn[1]   // first bar of a new overnight session -> new trading day
+rthStartBar = inRth and not inRth[1]   // first bar of RTH
+
+// RTH end hour/minute parsed from "HHMM-HHMM"
+rthEndH = int(str.tonumber(str.substring(rthSessIn, 5, 7)))
+rthEndM = int(str.tonumber(str.substring(rthSessIn, 7, 9)))
+
+stopWinMin = int(str.tonumber(stopWinIn))
+buf        = bufTicks * syminfo.mintick
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE (reset once per trading day)
+// ─────────────────────────────────────────────────────────────────────────────
+var bool  sawOvnStart = false   // ignore the partial first day on the chart
+var float ovnH        = na
+var float ovnL        = na
+var float ovnMid      = na
+var float rthOpen     = na
+var bool  levelsReady = false   // true from RTH open until next overnight start
+var int   rthStartTs  = na
+var int   rthEndTs    = na
+var int   windowEnd   = na
+var float winH        = na
+var float winL        = na
+var bool  windowDone  = false
+var int   dayDir      = 0       // 1 = long, -1 = short, 0 = no trade
+var bool  tradeTaken  = false
+var bool  tappedH     = false
+var bool  tappedL     = false
+var float stopLvl     = na
+var float tgtLvl      = na
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1) OVERNIGHT CALCULATION
+// ─────────────────────────────────────────────────────────────────────────────
+if newOvn
+    // New trading day: reset everything
+    sawOvnStart := true
+    ovnH        := high
+    ovnL        := low
+    ovnMid      := na
+    rthOpen     := na
+    levelsReady := false
+    windowEnd   := na
+    winH        := na
+    winL        := na
+    windowDone  := false
+    dayDir      := 0
+    tradeTaken  := false
+    tappedH     := false
+    tappedL     := false
+    stopLvl     := na
+    tgtLvl      := na
+else if inOvn and sawOvnStart and not levelsReady
+    ovnH := na(ovnH) ? high : math.max(ovnH, high)
+    ovnL := na(ovnL) ? low  : math.min(ovnL, low)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2) RTH OPEN LOGIC (evaluated once per day on the first RTH bar)
+// ─────────────────────────────────────────────────────────────────────────────
+if rthStartBar and sawOvnStart and not na(ovnH) and not na(ovnL)
+    ovnMid      := (ovnH + ovnL) / 2
+    rthOpen     := open
+    levelsReady := true
+    rthStartTs  := time
+    rthEndTs    := timestamp(tz, year(time, tz), month(time, tz), dayofmonth(time, tz), rthEndH, rthEndM)
+    windowEnd   := time + stopWinMin * 60 * 1000
+    winH        := high
+    winL        := low
+    // Strict comparisons: open exactly at Mid or outside/at the range edges = no trade
+    dayDir := rthOpen > ovnMid and rthOpen < ovnH ? 1 : rthOpen < ovnMid and rthOpen > ovnL ? -1 : 0
+    tgtLvl := dayDir == 1 ? ovnH : dayDir == -1 ? ovnL : na
+else if levelsReady and inRth and not windowDone and time < windowEnd
+    // Still inside the opening window: extend its high/low
+    winH := math.max(winH, high)
+    winL := math.min(winL, low)
+
+// Opening window is complete once a CONFIRMED bar closes at/after windowEnd
+if levelsReady and not windowDone and not na(windowEnd) and time_close >= windowEnd and barstate.isconfirmed
+    windowDone := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3) ENTRY (only on the first RTH bar, max one trade per day)
+// ─────────────────────────────────────────────────────────────────────────────
+// Extra guard against re-entry in real time (var values roll back intrabar)
+noTradeYetToday = strategy.closedtrades == 0 ? true : strategy.closedtrades.entry_time(math.max(strategy.closedtrades - 1, 0)) < nz(rthStartTs)
+
+canEnter = rthStartBar and levelsReady and dayDir != 0 and not tradeTaken and strategy.position_size == 0 and noTradeYetToday
+
+if canEnter
+    if dayDir == 1
+        strategy.entry("ORH Long", strategy.long, comment="Long -> OVN H")
+        alert("Overnight Range Hunt: LONG " + syminfo.ticker + " @ " + str.tostring(rthOpen, format.mintick) +
+             " | Target OVN H " + str.tostring(ovnH, format.mintick), alert.freq_once_per_bar)
+    else
+        strategy.entry("ORH Short", strategy.short, comment="Short -> OVN L")
+        alert("Overnight Range Hunt: SHORT " + syminfo.ticker + " @ " + str.tostring(rthOpen, format.mintick) +
+             " | Target OVN L " + str.tostring(ovnL, format.mintick), alert.freq_once_per_bar)
+    tradeTaken := true
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4) EXIT (target = OVN extreme, stop = opening-window extreme +/- buffer)
+// ─────────────────────────────────────────────────────────────────────────────
+if tradeTaken and dayDir != 0
+    if windowDone
+        stopLvl := dayDir == 1 ? winL - buf : winH + buf
+    else
+        // Window not finished yet: optional hard safety stop, otherwise target only
+        stopLvl := safetyPts > 0 ? (dayDir == 1 ? rthOpen - safetyPts : rthOpen + safetyPts) : na
+
+    if dayDir == 1
+        strategy.exit("ORH Long Exit", from_entry="ORH Long", stop=stopLvl, limit=tgtLvl,
+             comment_profit="TP OVN H", comment_loss="SL")
+    else
+        strategy.exit("ORH Short Exit", from_entry="ORH Short", stop=stopLvl, limit=tgtLvl,
+             comment_profit="TP OVN L", comment_loss="SL")
+
+// Time exit: flatten on the last RTH bar
+if flatAtClose and strategy.position_size != 0 and inRth and not na(rthEndTs) and time_close >= rthEndTs
+    strategy.close_all(comment="RTH Close", immediately=true)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5) TAP ALERTS (first touch of OVN High / OVN Low during RTH)
+// ─────────────────────────────────────────────────────────────────────────────
+tapH = levelsReady and inRth and not tappedH and high >= ovnH
+tapL = levelsReady and inRth and not tappedL and low  <= ovnL
+if tapH
+    tappedH := true
+    alert("Overnight Range Hunt: OVN HIGH tapped (" + str.tostring(ovnH, format.mintick) + ") on " + syminfo.ticker, alert.freq_once_per_bar)
+if tapL
+    tappedL := true
+    alert("Overnight Range Hunt: OVN LOW tapped (" + str.tostring(ovnL, format.mintick) + ") on " + syminfo.ticker, alert.freq_once_per_bar)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6) PLOTS
+// ─────────────────────────────────────────────────────────────────────────────
+pH = plot(levelsReady ? ovnH    : na, "OVN High", color.green, 2, plot.style_linebr)
+pL = plot(levelsReady ? ovnL    : na, "OVN Low",  color.red,   2, plot.style_linebr)
+pM = plot(levelsReady ? ovnMid  : na, "OVN Mid",  color.gray,  1, plot.style_circles)   // dotted look
+plot(levelsReady ? rthOpen : na, "RTH Open", color.blue, 2, plot.style_linebr)
+
+fill(pM, pH, showBg ? color.new(color.green, 90) : na, "Upper Half")
+fill(pM, pL, showBg ? color.new(color.red,   90) : na, "Lower Half")
+
+inPos = strategy.position_size != 0
+plot(inPos ? stopLvl : na, "Active Stop",   color.orange, 1, plot.style_linebr)
+plot(inPos ? tgtLvl  : na, "Active Target", color.lime,   1, plot.style_linebr)
+
+plotshape(tapH, "OVN High Tap", shape.triangledown, location.abovebar, color.green, size=size.tiny)
+plotshape(tapL, "OVN Low Tap",  shape.triangleup,   location.belowbar, color.red,   size=size.tiny)
+
+if showLbl and rthStartBar and levelsReady and barstate.isconfirmed
+    txt = dayDir == 1 ? "LONG → OVN H" : dayDir == -1 ? "SHORT → OVN L" : "NO TRADE"
+    col = dayDir == 1 ? color.green : dayDir == -1 ? color.red : color.gray
+    label.new(bar_index, dayDir == -1 ? high : low, txt, color=col, textcolor=color.white,
+         style=dayDir == -1 ? label.style_label_down : label.style_label_up, size=size.small)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7) STATS DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────────
+var int tpCount   = 0
+var int slCount   = 0
+var int timeCount = 0
+if ta.change(strategy.closedtrades) > 0
+    idx = strategy.closedtrades - 1
+    px  = strategy.closedtrades.exit_price(idx)
+    sz  = strategy.closedtrades.size(idx)          // + long, - short
+    tol = syminfo.mintick * 2
+    if not na(tgtLvl) and ((sz > 0 and px >= tgtLvl - tol) or (sz < 0 and px <= tgtLvl + tol))
+        tpCount += 1
+    else if not na(stopLvl) and ((sz > 0 and px <= stopLvl + tol) or (sz < 0 and px >= stopLvl - tol))
+        slCount += 1
+    else
+        timeCount += 1
+
+var table dash = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 15),
+     border_color=color.new(color.gray, 60), border_width=1)
+
+if showTable and barstate.islast
+    closed = strategy.closedtrades
+    wins   = strategy.wintrades
+    losses = strategy.losstrades
+    wr     = closed > 0 ? wins * 100.0 / closed : na
+    pf     = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    tc     = color.white
+    table.cell(dash, 0, 0, "Overnight Range Hunt", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 0, "",                     text_color=tc, text_size=size.small)
+    table.merge_cells(dash, 0, 0, 1, 0)
+    table.cell(dash, 0, 1, "Trades",        text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(closed), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 2, "Wins / Losses", text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 2, str.tostring(wins) + " / " + str.tostring(losses), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 3, "Win Rate",      text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 3, na(wr) ? "-" : str.tostring(wr, "#.0") + "%",
+         text_color=na(wr) ? tc : wr >= 50 ? color.lime : color.red, text_size=size.small)
+    table.cell(dash, 0, 4, "Target Hits",   text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(tpCount), text_color=color.lime, text_size=size.small)
+    table.cell(dash, 0, 5, "Stop Hits",     text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(slCount), text_color=color.red, text_size=size.small)
+    table.cell(dash, 0, 6, "Time Exits",    text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 6, str.tostring(timeCount), text_color=tc, text_size=size.small)
+    table.cell(dash, 0, 7, "Net P/L | PF",  text_color=tc, text_size=size.small)
+    table.cell(dash, 1, 7, str.tostring(strategy.netprofit, "#,##0.00") + " | " + (na(pf) ? "-" : str.tostring(pf, "#.00")),
+         text_color=strategy.netprofit >= 0 ? color.lime : color.red, text_size=size.small)
