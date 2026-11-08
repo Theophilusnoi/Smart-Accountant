@@ -1,0 +1,13 @@
+# Beyondwords runtime and private book data
+.beyondwords-runtime*/
+.epubcheck/
+projects/
+outputs/
+beyondwords-mcp*.json
+beyondwords-mcp*.toml
+cookies*.json
+storage-state*.json
+__pycache__/
+*.py[cod]
+.env
+.env.*
