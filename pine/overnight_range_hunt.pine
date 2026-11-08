@@ -144,7 +144,12 @@ if levelsReady and not windowDone and not na(windowEnd) and time_close >= window
 // Extra guard against re-entry in real time (var values roll back intrabar)
 noTradeYetToday = strategy.closedtrades == 0 ? true : strategy.closedtrades.entry_time(math.max(strategy.closedtrades - 1, 0)) < nz(rthStartTs)
 
-canEnter = rthStartBar and levelsReady and dayDir != 0 and not tradeTaken and strategy.position_size == 0 and noTradeYetToday
+// Skip the day if price already reached the target on the signal bar. Otherwise the
+// entry fills (next bar open) beyond the target and the take-profit closes it at once
+// for a commission/slippage loss. This happens mostly on 5m+ charts.
+targetUntouched = dayDir == 1 ? high < ovnH : dayDir == -1 ? low > ovnL : false
+
+canEnter = rthStartBar and levelsReady and dayDir != 0 and not tradeTaken and strategy.position_size == 0 and noTradeYetToday and targetUntouched
 
 if canEnter
     if dayDir == 1
