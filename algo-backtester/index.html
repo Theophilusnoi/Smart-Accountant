@@ -199,8 +199,10 @@ tr.click { cursor: pointer; }
           <label class="f">Slippage %<input id="slipPct" type="number" value="0.02" min="0" step="0.01"></label>
           <label class="f">Max leverage<input id="maxLev" type="number" value="1" min="0.1" step="0.5"></label>
           <label class="f">Breakeven at (R)<input id="beR" type="number" value="0" min="0" step="0.25"></label>
+          <label class="f">Trailing stop (× ATR)<input id="trailAtr" type="number" value="0" min="0" step="0.25"></label>
+          <label class="f">Trail starts at (R)<input id="trailStartR" type="number" value="0" min="0" step="0.25"></label>
         </div>
-        <p class="hint">Stop 0 = no stop; size then uses Risk % as the share of equity per trade. Target 0 = exit on signal only.</p>
+        <p class="hint">Stop 0 = no stop; size then uses Risk % as the share of equity per trade. Target 0 = exit on signal only. Trailing stop follows the best price since entry by that many ATRs and only ever tightens; 0 = off. "Trail starts at" waits until the trade is that many R in profit.</p>
         <div class="btns">
           <button class="btn primary" id="runBtn" type="button">Run backtest</button>
           <button class="btn" id="savePreset" type="button">Save preset</button>
@@ -509,6 +511,127 @@ const RULE_CHEAT = `
 <p><b>Your numbers</b>: p1, p2, p3 come from the boxes above, so the optimizer can tune them.</p>
 <p>Rules are checked when each bar closes; trades fill at the next bar's open. Stops and targets come from the Risk panel.</p>`;
 
+
+/* ============================== Pine Script import ==============================
+   Converts common TradingView strategy scripts (v4/v5) into custom rules: inputs, plain variable
+   definitions, if-blocks, strategy.entry / strategy.close / close_all and plot(). Anything it can't
+   convert is listed so nothing is silently dropped. */
+function pineToRules(src) {
+  const warn = new Set(), inputs = [], defs = {}, entryIds = {};
+  const longC = [], shortC = [], xl = [], xs = [], plots = [];
+  let stops = false;
+  const stripComment = l => { let q = null; for (let i = 0; i < l.length; i++) { const c = l[i]; if (q) { if (c === q) q = null; } else if (c === '"' || c === "'") q = c; else if (c === "/" && l[i + 1] === "/") return l.slice(0, i); } return l; };
+  const splitTop = s => { const out = []; let d = 0, q = null, cur = ""; for (const c of s) { if (q) { cur += c; if (c === q) q = null; continue; } if (c === '"' || c === "'") q = c; if ("([".includes(c)) d++; if (")]".includes(c)) d--; if (c === "," && d === 0) { out.push(cur.trim()); cur = ""; } else cur += c; } if (cur.trim()) out.push(cur.trim()); return out; };
+  const callArgs = (text, fn) => { const i = text.indexOf("("); return splitTop(text.slice(i + 1, text.lastIndexOf(")"))); };
+  const named = (args, key) => { const a = args.find(x => new RegExp("^" + key + "\\s*=").test(x)); return a ? a.replace(/^\w+\s*=\s*/, "") : null; };
+  const unq = s => (s || "").replace(/^["']|["']$/g, "");
+
+  // 1) join wrapped lines into statements with their indent
+  const stmts = []; let buf = "", ind = 0;
+  for (const raw of src.replace(/\r/g, "").replace(/\t/g, "    ").split("\n")) {
+    const line = stripComment(raw); if (!line.trim()) continue;
+    if (!buf) ind = line.match(/^ */)[0].length;
+    buf += (buf ? " " : "") + line.trim();
+    const depth = (buf.match(/[([]/g) || []).length - (buf.match(/[)\]]/g) || []).length;
+    if (depth > 0 || /(\band|\bor|[-+*/,?:<>=])$/.test(buf)) continue;
+    stmts.push({ ind, text: buf }); buf = "";
+  }
+  if (buf) stmts.push({ ind, text: buf });
+
+  // 2) expression translation
+  const closeOf = (s, i) => { let d = 0; for (let j = i; j < s.length; j++) { if (s[j] === "(") d++; else if (s[j] === ")" && --d === 0) return j; } return -1; };
+  const stripOuter = s => { s = s.trim(); while (s[0] === "(" && closeOf(s, 0) === s.length - 1) s = s.slice(1, -1).trim(); return s; };
+  const atomic = s => { const m = s.match(/^[\w.]+/); if (!m) return false; if (m[0].length === s.length) return true; let r = s.slice(m[0].length);
+    if (r[0] === "(") { const e = closeOf(r, 0); if (e < 0) return false; r = r.slice(e + 1); } return /^(\[\w+\])*$/.test(r); };
+  const wrap = s => { s = stripOuter(s); return atomic(s) ? s : `(${s})`; };
+  const tidy = s => stripOuter(s.replace(/\s+and\s+true\b/g, "").replace(/\btrue\s+and\s+/g, ""));
+  const MAP = { "ta.ema": "ema", "ta.sma": "sma", "ta.rma": "ema", "ta.rsi": "rsi", "ta.atr": "atr", "ta.highest": "highest", "ta.lowest": "lowest", "ta.stdev": "stdev",
+    "ta.change": "change", "ta.crossover": "crossUp", "ta.crossunder": "crossDown", "ta.rising": "rising", "ta.falling": "falling", "math.abs": "abs", "math.max": "max", "math.min": "min",
+    crossover: "crossUp", crossunder: "crossDown", stdev: "stdev", highest: "highest", lowest: "lowest", change: "change", abs: "abs", max: "max", min: "min", rma: "ema", "ta.cum": null };
+  const KNOWN = new Set(["dayofweek", "range", "open", "high", "low", "close", "volume", "hl2", "hlc3", "true", "false", "and", "or", "not", "ema", "sma", "rsi", "atr", "vwap", "hour", "rising", "falling", "p1", "p2", "p3"]);
+  function tr(e) {
+    let s = e.trim();
+    if (/\?/.test(s)) warn.add("Ternary expressions (a ? b : c) are not supported. Rewrite that line as separate rules.");
+    s = s.replace(/strategy\.position_size\s*(>=|<=|==|!=|>|<)\s*0/g, () => { warn.add("Checks on strategy.position_size were treated as always true; the backtester already only exits open trades and enters when flat or reversing."); return "true"; });
+    s = s.replace(/\bta\.vwap\s*\([^()]*\)|\bta\.vwap\b|\bvwap\s*\([^()]*\)/g, "vwap");
+    s = s.replace(/\bta\.cross\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (_, a) => `(crossUp(${a}) or crossDown(${a}))`);
+    s = s.replace(/\b(ta\.)?(highest|lowest)\s*\(\s*([^,()]+)\s*\)/g, (_, t, f, n) => `${f}(${f === "highest" ? "high" : "low"}, ${n})`);
+    s = s.replace(/\bta\.tr(\s*\(\s*(true|false)?\s*\))?(?!\w)/g, () => { warn.add("ta.tr was approximated by the bar range (high − low)."); return "range"; });
+    const DOW = { sunday: 1, monday: 2, tuesday: 3, wednesday: 4, thursday: 5, friday: 6, saturday: 7 };
+    s = s.replace(/\bdayofweek\.(\w+)/g, (_, d) => DOW[d] ?? _);
+    s = s.replace(/\bdayofweek\b(?!\.)/g, "(dayofweek + 1)");
+    if (/\bhour\b/.test(s)) warn.add("Pine's hour uses the exchange time zone; here hour is UTC. Adjust the hour numbers if needed.");
+    s = s.replace(/[A-Za-z_][\w.]*/g, (id, off, str) => {
+      if (str[off - 1] === ".") return id;
+      if (id in MAP) { if (MAP[id] == null) { warn.add(`${id} is not supported.`); return id; } return MAP[id]; }
+      if (id in defs) return defs[id];
+      if (KNOWN.has(id)) return id;
+      if (/^(ta|math|request|str|array|matrix|map)\./.test(id)) warn.add(`${id} is not supported yet; that rule will show an error.`);
+      else if (id === "na" || id === "nz") warn.add("na / nz() are not supported; that rule will show an error.");
+      else if (!/^\d/.test(id)) warn.add(`"${id}" was not defined before it was used (or is a built-in that isn't supported).`);
+      return id;
+    });
+    return s.replace(/\s+/g, " ");
+  }
+
+  // 3) walk statements with an if/else condition stack
+  const stack = [], lastIf = {}; // lastIf[indent] = conditions of previous if/else-if branches at that level
+  const curCond = extra => { const cs = [...stack.map(x => x.cond), ...(extra ? [extra] : [])]; return cs.length === 1 ? stripOuter(cs[0]) : cs.map(wrap).join(" and "); };
+  for (const { ind, text } of stmts) {
+    while (stack.length && stack[stack.length - 1].ind >= ind) stack.pop();
+    let m;
+    if (/^\/\/@version|^(strategy|indicator|study)\s*\(/.test(text)) {
+      if (/^(indicator|study)\s*\(/.test(text)) warn.add("This is an indicator, not a strategy. Only strategy.entry() calls create trades; write Buy/Sell rules from its plots instead.");
+      const cm = text.match(/commission_value\s*=\s*([\d.]+)/); if (cm && /commission_type\s*=\s*strategy\.commission\.percent/.test(text)) { $("commPct").value = +cm[1]; warn.add(`Commission set to ${+cm[1]}% from the strategy() settings.`); }
+      continue;
+    }
+    if ((m = text.match(/^else\s+if\s+(.+)$/))) { const prev = lastIf[ind] || []; const c = tr(m[1]); stack.push({ ind, cond: [...prev.map(p => `not (${p})`), c].join(" and ") }); lastIf[ind] = [...prev, c]; continue; }
+    if (text === "else") { const prev = lastIf[ind] || []; stack.push({ ind, cond: prev.map(p => `not (${p})`).join(" and ") || "true" }); continue; }
+    if ((m = text.match(/^if\s+(.+)$/))) { const c = tr(m[1]); stack.push({ ind, cond: c }); lastIf[ind] = [c]; continue; }
+    if (/^\w+\s*\([^)]*\)\s*=>/.test(text)) { warn.add("Custom functions (name(x) => …) are not supported. Inline them, or ask for the strategy to be added as a built-in setup."); continue; }
+    if (/^\[.*\]\s*=/.test(text)) { warn.add(`Tuple results like "${text.slice(0, 40)}…" (e.g. ta.macd, ta.bb) are not supported yet.`); continue; }
+    if ((m = text.match(/^(?:var\s+|varip\s+)?(?:(?:float|int|bool|string|color|series\s+\w+|simple\s+\w+)\s+)?([A-Za-z_]\w*)\s*(:=|=(?!=))\s*(.+)$/))) {
+      const [, name, op, rhs] = m;
+      const inp = rhs.match(/^input(?:\.\w+)?\s*\((.*)\)$/);
+      if (inp) {
+        const args = splitTop(inp[1]), dv = named(args, "defval") ?? args[0];
+        if (/^-?[\d.]+$/.test(dv)) {
+          if (inputs.length < 3) { const k = "p" + (inputs.length + 1); inputs.push({ name, k, v: +dv, title: unq(named(args, "title") ?? args[1] ?? name) }); defs[name] = k; }
+          else { defs[name] = dv; warn.add(`Input "${name}" was fixed at ${dv} (only the first three numeric inputs become p1–p3).`); }
+        } else if (dv === "true" || dv === "false") { defs[name] = dv; warn.add(`Input "${name}" was fixed at ${dv}.`); }
+        else if (/^(open|high|low|close|hl2|hlc3|volume)$/.test(dv)) defs[name] = dv;
+        else { defs[name] = dv; warn.add(`Input "${name}" (${dv}) isn't a number; check rules that use it.`); }
+        continue;
+      }
+      if (op === ":=" || stack.length || /^var/.test(text)) warn.add(`"${name}" changes over time (var, := or set inside an if). Only its first plain definition is used, so results may differ.`);
+      if (!(name in defs) || (!stack.length && op === "=")) defs[name] = wrap(tr(rhs));
+      continue;
+    }
+    if ((m = text.match(/^strategy\.(entry|order)\s*\(/))) {
+      const a = callArgs(text), id = unq(a[0]), dirArg = named(a, "direction") ?? a[1] ?? "", when = named(a, "when");
+      const dir = /long/.test(dirArg) ? 1 : /short/.test(dirArg) ? -1 : 0;
+      if (!dir) { warn.add(`Couldn't tell the direction of strategy.entry("${id}").`); continue; }
+      entryIds[id] = dir; (dir === 1 ? longC : shortC).push(curCond(when && tr(when)) || "true");
+      continue;
+    }
+    if (/^strategy\.close_all\s*\(/.test(text)) { const w = named(callArgs(text), "when"); const c = curCond(w && tr(w)) || "true"; xl.push(c); xs.push(c); continue; }
+    if (/^strategy\.close\s*\(/.test(text)) {
+      const a = callArgs(text), id = unq(a[0]), w = named(a, "when"), c = curCond(w && tr(w)) || "true", d = entryIds[id];
+      if (d === 1) xl.push(c); else if (d === -1) xs.push(c); else { xl.push(c); xs.push(c); warn.add(`strategy.close("${id}") didn't match an entry id, so it closes both sides.`); }
+      continue;
+    }
+    if (/^strategy\.exit\s*\(/.test(text)) { stops = true; if (/trail_/.test(text)) warn.add("strategy.exit trailing settings aren't converted; use Trailing stop in Risk & costs."); continue; }
+    if ((m = text.match(/^plot\s*\(/))) { const a = callArgs(text)[0]; if (a && !/^(na|0)$/.test(a)) plots.push(stripOuter(tr(a))); continue; }
+    if (/^(plotshape|plotchar|plotarrow|bgcolor|barcolor|fill|hline|alertcondition|alert|label\.|line\.|box\.|table\.)/.test(text)) continue;
+    if (/^request\.security/.test(text) || /request\.security/.test(text)) { warn.add("request.security (other timeframes/symbols) is not supported."); continue; }
+    warn.add(`Skipped: ${text.slice(0, 60)}${text.length > 60 ? "…" : ""}`);
+  }
+  if (stops) warn.add("strategy.exit stop/limit levels aren't converted. Set Stop, Target and Trailing stop in Risk & costs to match.");
+  const join = arr => tidy(arr.length > 1 ? arr.map(c => wrap(tidy(c))).join(" or ") : (arr[0] || ""));
+  if (!longC.length && !shortC.length) warn.add("No strategy.entry() calls were found, so there are no buy or sell rules.");
+  return { inputs, warnings: [...warn], rules: { longEntry: join(longC), shortEntry: join(shortC), exitLong: join(xl), exitShort: join(xs), plot: plots.slice(0, 4).join("; ") } };
+}
+
 /* ============================== Strategies ==============================
    Each returns { sig, exit, overlays }. sig[i] = +1 / -1 entry on close of bar i.
    exit[i] = +1 closes longs, -1 closes shorts, 2 closes either.               */
@@ -700,7 +823,7 @@ function backtest(b, S, R) {
       if (qty > 0 && eq > 0) {
         const ec = entry * qty * comm;
         pos = { dir: ps, ei: i, entry, qty, entryComm: ec, eqAtEntry: eq, riskAmt: stopDist * qty,
-          stop: stopDist ? entry - ps * stopDist : NaN, tp: stopDist && R.tpR > 0 ? entry + ps * R.tpR * stopDist : NaN, stopDist, mfe: 0, mae: 0, be: false };
+          stop: stopDist ? entry - ps * stopDist : NaN, tp: stopDist && R.tpR > 0 ? entry + ps * R.tpR * stopDist : NaN, stopDist, mfe: 0, mae: 0, be: false, best: entry, trailing: false };
         events.push({ i, kind: "entry", dir: ps });
         barsIn = 0;
       }
@@ -713,10 +836,21 @@ function backtest(b, S, R) {
       pos.mfe = Math.max(pos.mfe, fav / pos.entry); pos.mae = Math.max(pos.mae, adv / pos.entry);
       const hitStop = !isNaN(pos.stop) && (d === 1 ? bar.l <= pos.stop : bar.h >= pos.stop);
       const hitTp = !isNaN(pos.tp) && (d === 1 ? bar.h >= pos.tp : bar.l <= pos.tp);
-      if (hitStop) close(i, d === 1 ? Math.min(bar.o, pos.stop) : Math.max(bar.o, pos.stop), pos.be ? "breakeven" : "stop");
+      if (hitStop) close(i, d === 1 ? Math.min(bar.o, pos.stop) : Math.max(bar.o, pos.stop), pos.trailing ? "trailing stop" : pos.be ? "breakeven" : "stop");
       else if (hitTp) close(i, d === 1 ? Math.max(bar.o, pos.tp) : Math.min(bar.o, pos.tp), "target");
       else if (R.maxBars > 0 && barsIn >= R.maxBars) close(i, bar.c, "time");
-      else if (R.beR > 0 && pos.stopDist && !pos.be && fav >= R.beR * pos.stopDist) { pos.stop = pos.entry; pos.be = true; }
+      else {
+        // stop adjustments use this bar's completed data and apply from the next bar on
+        if (R.beR > 0 && pos.stopDist && !pos.be && fav >= R.beR * pos.stopDist && (isNaN(pos.stop) || (d === 1 ? pos.stop < pos.entry : pos.stop > pos.entry))) { pos.stop = pos.entry; pos.be = true; }
+        if (R.trailAtr > 0 && !isNaN(atr[i])) {
+          pos.best = d === 1 ? Math.max(pos.best, bar.h) : Math.min(pos.best, bar.l);
+          const gain = d === 1 ? pos.best - pos.entry : pos.entry - pos.best;
+          if (!(R.trailStartR > 0 && pos.stopDist) || gain >= R.trailStartR * pos.stopDist) {
+            const ns = pos.best - d * R.trailAtr * atr[i];
+            if (isNaN(pos.stop) || (d === 1 ? ns > pos.stop : ns < pos.stop)) { pos.stop = ns; pos.trailing = true; }
+          }
+        }
+      }
     }
     equity[i] = cash + (pos ? pos.dir * pos.qty * (bar.c - pos.entry) - pos.entryComm : 0);
   }
@@ -837,24 +971,36 @@ function renderParams(vals) {
   let html = s.params.map(p => `<label class="f">${p.l}<input id="p_${p.k}" type="number" value="${vals?.[p.k] ?? (s.custom ? ex[p.k] : p.d)}" min="${p.min}" max="${p.max}" step="${p.s}"></label>`).join("");
   if (s.custom) {
     html += `<label class="f wide">Start from an example<select id="exSel"><option value="">Choose…</option>${Object.keys(RULE_EXAMPLES).map(k => `<option>${k}</option>`).join("")}</select></label>` +
+      `<details class="cheat wide" id="pineBox"><summary>Import a TradingView Pine Script strategy</summary>
+         <div style="display:grid;gap:8px;margin-top:8px"><label class="f">Paste the strategy code<textarea id="pineSrc" rows="7" spellcheck="false" autocapitalize="off" placeholder="//@version=5\nstrategy(&quot;My strategy&quot;)\n..."></textarea></label>
+         <div class="btns"><button class="btn" id="pineGo" type="button">Convert to rules</button></div><div id="pineReport"></div></div></details>` +
       RULE_FIELDS.map(f => `<label class="f wide">${f.l}<textarea id="r_${f.k}" rows="${f.k === "plot" ? 2 : 3}" spellcheck="false" autocapitalize="off" autocomplete="off">${escHtml(vals?.[f.k] ?? ex[f.k])}</textarea></label>`).join("") +
       `<p class="err wide" id="ruleErr" hidden></p><p class="hint wide" id="ruleInfo"></p>
        <details class="cheat wide"><summary>Formula cheat sheet</summary>${RULE_CHEAT}</details>`;
   }
   $("stratParams").innerHTML = html;
+  if (s.custom) $("pineGo").onclick = () => {
+    const r = pineToRules($("pineSrc").value);
+    for (const k of ["p1", "p2", "p3"]) { const inp = r.inputs.find(x => x.k === k); if (inp) $("p_" + k).value = inp.v; }
+    for (const f of RULE_FIELDS) $("r_" + f.k).value = r.rules[f.k];
+    $("pineReport").innerHTML = (r.inputs.length ? `<p><b>Inputs</b>: ${r.inputs.map(x => `${escHtml(x.title)} → ${x.k} = ${x.v}`).join(", ")}</p>` : "") +
+      (r.warnings.length ? `<p><b>Check these</b>:</p><ul style="margin:0;padding-left:18px">${r.warnings.map(w => `<li>${escHtml(w)}</li>`).join("")}</ul>` : `<p>Converted with no warnings.</p>`);
+    runAll(); fillOptRange();
+  };
   if (s.custom) $("exSel").onchange = () => { const e = RULE_EXAMPLES[$("exSel").value]; if (!e) return;
     for (const k of ["p1", "p2", "p3"]) $("p_" + k).value = e[k]; for (const f of RULE_FIELDS) $("r_" + f.k).value = e[f.k]; runAll(); fillOptRange(); };
   const ox = $("optX"), oy = $("optY"); ox.innerHTML = oy.innerHTML = "";
   s.params.forEach(p => { ox.add(new Option(p.l, p.k)); oy.add(new Option(p.l, p.k)); });
-  oy.add(new Option("Stop (× ATR)", "_stopAtr")); oy.add(new Option("Target (R)", "_tpR")); ox.add(new Option("Stop (× ATR)", "_stopAtr")); ox.add(new Option("Target (R)", "_tpR"));
+  for (const sel of [ox, oy]) for (const [l, k] of RISK_AXES) sel.add(new Option(l, k));
   oy.selectedIndex = s.params.length > 1 ? 1 : s.params.length; fillOptRange();
 }
-function paramDef(key) { if (key === "_stopAtr") return { d: 2, min: 0.5, max: 4, s: 0.5 }; if (key === "_tpR") return { d: 2, min: 0.5, max: 4, s: 0.5 }; return STRATS[$("stratSel").value].params.find(p => p.k === key); }
+const RISK_AXES = [["Stop (× ATR)", "_stopAtr"], ["Target (R)", "_tpR"], ["Trailing stop (× ATR)", "_trailAtr"]];
+function paramDef(key) { if (key.startsWith("_")) return { d: key === "_trailAtr" ? 3 : 2, min: key === "_trailAtr" ? 0 : 0.25, max: 10, s: 0.25 }; return STRATS[$("stratSel").value].params.find(p => p.k === key); }
 function fillOptRange() {
   for (const ax of ["X", "Y"]) {
     const key = $("opt" + ax).value, p = paramDef(key); if (!p) continue;
-    const inp = key === "_stopAtr" ? $("stopAtr") : key === "_tpR" ? $("tpR") : $("p_" + key);
-    let cur = parseFloat(inp?.value); if (isNaN(cur)) cur = p.d;
+    const inp = key.startsWith("_") ? $(key.slice(1)) : $("p_" + key);
+    let cur = parseFloat(inp?.value); if (isNaN(cur) || (key.startsWith("_") && cur === 0)) cur = p.d;
     const intLike = Number.isInteger(cur) && cur >= 4 && (p.s === "any" || p.s >= 1);
     let lo = Math.max(p.min, cur * 0.5), hi = Math.min(p.max, cur === 0 ? 1 : cur * 1.5);
     if (intLike) { lo = Math.round(lo); hi = Math.round(hi); }
@@ -873,7 +1019,7 @@ function readParams() {
 function readRisk() {
   const g = (id, d) => { const v = parseFloat($(id).value); return isNaN(v) ? d : v; };
   return { capital: g("capital", 10000), riskPct: g("riskPct", 1), stopAtr: g("stopAtr", 2), tpR: g("tpR", 2), atrLen: Math.max(2, Math.round(g("atrLen", 14))),
-    maxBars: Math.round(g("maxBars", 0)), commPct: g("commPct", 0), slipPct: g("slipPct", 0), maxLev: g("maxLev", 1), beR: g("beR", 0), dir: $("dirSel").value };
+    maxBars: Math.round(g("maxBars", 0)), commPct: g("commPct", 0), slipPct: g("slipPct", 0), maxLev: g("maxLev", 1), beR: g("beR", 0), trailAtr: g("trailAtr", 0), trailStartR: g("trailStartR", 0), dir: $("dirSel").value };
 }
 
 /* ============================== Charts ============================== */
@@ -1038,7 +1184,7 @@ $("savePreset").onclick = () => {
 $("presetSel").onchange = () => { const p = store.get("fd_presets", {})[$("presetSel").value]; if (p) applyConfig(p); $("presetSel").value = ""; };
 function applyConfig(p) {
   if (!STRATS[p.strat]) return; $("stratSel").value = p.strat; renderParams(p.params);
-  const r = p.risk || {}; for (const k of ["capital", "riskPct", "stopAtr", "tpR", "atrLen", "maxBars", "commPct", "slipPct", "maxLev", "beR"]) if (r[k] != null) $(k).value = r[k];
+  const r = p.risk || {}; for (const k of ["capital", "riskPct", "stopAtr", "tpR", "atrLen", "maxBars", "commPct", "slipPct", "maxLev", "beR", "trailAtr", "trailStartR"]) if (r[k] != null) $(k).value = r[k];
   if (r.dir) $("dirSel").value = r.dir; runAll();
 }
 
@@ -1070,7 +1216,7 @@ $("optRun").onclick = async () => {
   const t0 = performance.now();
   for (const x of xs) for (const y of ys) {
     const P = { ...base }, R = { ...R0 };
-    for (const [k, v] of [[kx, x], [ky, y]]) { if (k === "_stopAtr") R.stopAtr = v; else if (k === "_tpR") R.tpR = v; else P[k] = v; }
+    for (const [k, v] of [[kx, x], [ky, y]]) { if (k.startsWith("_")) R[k.slice(1)] = v; else P[k] = v; }
     const mIS = backtest(isBars, S.run(isBars, P), R).metrics;
     let mOOS = null;
     if (split < st.bars.length - 50) { const r = backtest(oosBars, S.run(oosBars, P), R); mOOS = r.metrics; }
