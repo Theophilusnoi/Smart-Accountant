@@ -1,28 +1,35 @@
 //@version=5
 // ═══════════════════════════════════════════════════════════════════════════════
-//  MNQ LIQUIDITY SWEEP — 1-MINUTE SUPPORT REJECTION SCALPER  (STRATEGY VERSION)
+//  MNQ LIQUIDITY SWEEP — SUPPORT REJECTION SCALPER  (STRATEGY v2)
 // ═══════════════════════════════════════════════════════════════════════════════
 //  IDEA (what you see on the chart):
-//   1. A blue KEY SUPPORT ZONE sits under price (recent swing low).
+//   1. A blue KEY SUPPORT ZONE sits under price (a confirmed swing low).
 //   2. A candle spikes BELOW that zone (stop-losses / sell-side liquidity get
-//      grabbed) but CLOSES BACK ABOVE it  ->  the "TRAP" / trigger candle.
-//   3. When that trigger candle closes, we buy at the OPEN of the next candle.
-//   4. Stop Loss goes a few ticks under the trigger candle's wick.
-//      Take Profit = Entry + (Risk x RR)  (default 1:3, aiming at the upper zone).
-//   5. A gray RISK box and a blue REWARD box are drawn to the right, with a red
-//      SL line and a green TP line, exactly like the screenshot setup.
+//      grabbed) but CLOSES BACK ABOVE it with a real rejection wick
+//      ->  the "TRAP" / trigger candle.
+//   3. When the trigger candle closes, we buy at the OPEN of the next candle.
+//   4. Stop Loss goes under the trigger candle's wick (never tighter than a
+//      fraction of ATR, so normal noise can't knock us out).
+//      Take Profit = Entry + (Risk x RR)  (default 1:3).
+//   5. Gray RISK box + blue REWARD box, red SL line + green TP line.
 //
-//  ORDER FLOW (how TradingView executes it):
-//   • Trigger candle closes  -> strategy.entry() is sent (market order).
-//   • TradingView fills that market order at the OPEN of the next candle,
-//     which is precisely the entry rule of this setup.
-//   • A bracket (strategy.exit with stop + limit) is attached at the same time
-//     so the entry candle itself is already protected, then it is re-centred on
-//     the real fill price once the position is open.
+//  v2 CHANGES (fixes found from live chart review):
+//   • Support = last CONFIRMED SWING LOW (pivot) instead of a rolling lowest
+//     low — in downtrends the rolling low kept creating fake "supports".
+//   • Each support level can be traded ONCE. A candle CLOSING below it kills it
+//     (that's an accepted breakdown, not a sweep).
+//   • Rejection quality: min lower-wick % and close in the upper part of the
+//     candle. A 1-tick poke below support is no longer a "trap".
+//   • Min sweep depth + max sweep depth (too deep = real breakdown).
+//   • ATR-based stops: SL is never tighter than X * ATR and never wider than
+//     Y * ATR. (Tick-based max risk filtered OUT the good setups on 5m.)
+//   • Trend filter (EMA), cooldown after a loss, daily loss limit.
+//   • Optional breakeven move.
+//   • Cleaner chart: no overlapping text.
 //
-//  Designed for the 1-minute chart (MNQ / NQ), but works on any symbol.
-//  ALERTS: create an alert on this strategy and choose
-//          "alert() function calls only" (or use the built-in order-fill alerts).
+//  Designed for the 1-minute chart (MNQ / NQ). If you run it on 5m, the
+//  ATR-based settings adapt automatically.
+//  ALERTS: create an alert on this strategy -> "alert() function calls only".
 // ═══════════════════════════════════════════════════════════════════════════════
 strategy(title = "MNQ Liquidity Sweep",
      shorttitle = "MNQ Sweep",
@@ -40,243 +47,319 @@ strategy(title = "MNQ Liquidity Sweep",
      max_lines_count = 500,
      max_labels_count = 500)
 
-// NOTE on calc_on_every_tick = true:
-// It lets the "setup forming" alert fire the moment price wicks under support
-// in real time. All ORDERS are still only sent on confirmed (closed) candles
-// via barstate.isconfirmed, so live trading behaves exactly like the backtest.
+// calc_on_every_tick = true lets the "setup forming" alert fire intrabar.
+// Every ORDER is still gated by barstate.isconfirmed (closed candles only),
+// so live behaviour matches the backtest.
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // --- USER INPUTS ---
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// --- 1) KEY SUPPORT ZONE SETTINGS (the blue zone in the screenshots) ---
+// --- 1) KEY SUPPORT ZONE (the blue zone) ---
 string GRP_SUP     = "1) Key Support Zone"
-int    supportLen  = input.int(30, "Support Lookback (bars)", minval = 2, group = GRP_SUP, tooltip = "The support level is the LOWEST LOW of the previous N candles (current candle excluded). On 1m, 30 = the last 30 minutes.")
-int    zoneTicks   = input.int(4, "Zone Thickness (ticks above level)", minval = 0, group = GRP_SUP, tooltip = "Purely visual: how tall the blue support box is drawn above the support price. MNQ: 4 ticks = 1 point.")
-bool   showSupHist = input.bool(true, "Plot Support History (step line)", group = GRP_SUP)
+string supportMode = input.string("Swing Pivot", "Support Method", options = ["Swing Pivot", "Lowest Low"], group = GRP_SUP, tooltip = "Swing Pivot (recommended): the last confirmed swing low. Lowest Low: lowest low of the previous N bars (v1 behaviour — creates many fake supports in downtrends).")
+int    pivLeft     = input.int(10, "Swing Pivot: Left Bars", minval = 1, group = GRP_SUP, tooltip = "A swing low needs this many higher lows to its LEFT.")
+int    pivRight    = input.int(5, "Swing Pivot: Right Bars", minval = 1, group = GRP_SUP, tooltip = "...and this many higher lows to its RIGHT (confirmation delay).")
+int    minLevelAge = input.int(10, "Min Level Age (bars)", minval = 0, group = GRP_SUP, tooltip = "The swing low must be at least this old so stops have had time to pile up under it.")
+int    supportLen  = input.int(30, "Lowest Low: Lookback (bars)", minval = 2, group = GRP_SUP)
+int    zoneTicks   = input.int(4, "Zone Thickness (ticks above level)", minval = 0, group = GRP_SUP, tooltip = "Visual only.")
 
-// --- 2) TRIGGER CANDLE SETTINGS (the "Trap") ---
+// --- 2) TRIGGER CANDLE (the Trap) ---
 string GRP_TRG       = "2) Trigger Candle (The Trap)"
-int    minSweepTicks = input.int(1, "Min Sweep Depth (ticks below support)", minval = 1, group = GRP_TRG, tooltip = "How far the wick must pierce BELOW support to count as a liquidity grab.")
-bool   reqBullish    = input.bool(false, "Require Bullish Trigger Candle (close > open)", group = GRP_TRG)
+int    minSweepTicks = input.int(4, "Min Sweep Depth (ticks below support)", minval = 1, group = GRP_TRG, tooltip = "Wick must pierce support by at least this much. MNQ: 4 ticks = 1 point.")
+float  maxSweepAtr   = input.float(1.5, "Max Sweep Depth (x ATR, 0 = off)", minval = 0, step = 0.25, group = GRP_TRG, tooltip = "If the wick goes deeper than this it is a real breakdown, not a stop hunt.")
+int    minWickPct    = input.int(40, "Min Lower Wick (% of candle range)", minval = 0, maxval = 100, group = GRP_TRG, tooltip = "The rejection wick must be a meaningful part of the candle.")
+int    minClosePos   = input.int(50, "Close in Upper % of Candle", minval = 0, maxval = 100, group = GRP_TRG, tooltip = "50 = the close must be in the upper half of the candle (buyers won).")
 
-// --- 3) RISK MANAGEMENT (keep the risk tight) ---
+// --- 3) RISK MANAGEMENT ---
 string GRP_RSK       = "3) Risk Management"
 int    qtyContracts  = input.int(1, "Contracts", minval = 1, group = GRP_RSK)
-int    slBufferTicks = input.int(2, "SL Buffer Below Wick (ticks)", minval = 0, group = GRP_RSK, tooltip = "Stop Loss = Trigger Candle Low minus this many ticks (protects against spread / wick noise).")
-int    rrRatio       = input.int(3, "Risk : Reward  (1 : X)", minval = 1, maxval = 20, group = GRP_RSK, tooltip = "Take Profit distance = Risk x this value. Default 1:3 (try 4 to aim for the upper zone).")
-int    maxRiskTicks  = input.int(40, "Max Risk per Trade (ticks, 0 = off)", minval = 0, group = GRP_RSK, tooltip = "Skip setups whose stop is too wide. MNQ: 40 ticks = 10 points = $20 per contract.")
-int    projBars      = input.int(20, "R/R Box Projection (bars to the right)", minval = 1, group = GRP_RSK)
+int    rrRatio       = input.int(3, "Risk : Reward  (1 : X)", minval = 1, maxval = 20, group = GRP_RSK)
+int    slBufferTicks = input.int(4, "SL Buffer Below Wick (ticks)", minval = 0, group = GRP_RSK)
+int    atrLen        = input.int(14, "ATR Length", minval = 1, group = GRP_RSK)
+float  minStopAtr    = input.float(0.75, "Min Stop Distance (x ATR)", minval = 0, step = 0.25, group = GRP_RSK, tooltip = "If the wick stop is tighter than this, the SL is pushed lower. Stops of 2-4 points on NQ get hit by pure noise.")
+float  maxStopAtr    = input.float(3.0, "Max Stop Distance (x ATR, 0 = off)", minval = 0, step = 0.25, group = GRP_RSK, tooltip = "Skip setups whose stop would be wider than this.")
+float  beAtR         = input.float(0.0, "Move SL to Breakeven at (R) — 0 = off", minval = 0, step = 0.5, group = GRP_RSK, tooltip = "e.g. 1.5 = once price reaches +1.5R, the stop moves to entry + 1 tick.")
+int    projBars      = input.int(20, "R/R Box Projection (bars)", minval = 1, group = GRP_RSK)
 
-// --- 4) SESSION FILTER (optional — MNQ is cleanest during the New York session) ---
-string GRP_SES     = "4) Session Filter"
-bool   useSession  = input.bool(false, "Trade Only Inside Session", group = GRP_SES)
-string sessTime    = input.session("0930-1600", "Session (New York time)", group = GRP_SES)
-bool   flatOutside = input.bool(true, "Flatten Position When Session Ends", group = GRP_SES)
+// --- 4) FILTERS ---
+string GRP_FLT        = "4) Filters"
+bool   useTrend       = input.bool(true, "Trend Filter: only long above EMA", group = GRP_FLT)
+int    emaLen         = input.int(200, "Trend EMA Length", minval = 1, group = GRP_FLT)
+int    cooldownBars   = input.int(10, "Cooldown After a Loss (bars)", minval = 0, group = GRP_FLT)
+int    maxDailyLosses = input.int(3, "Max Losses per Day (0 = off)", minval = 0, group = GRP_FLT)
+bool   useSession     = input.bool(false, "Trade Only Inside Session", group = GRP_FLT)
+string sessTime       = input.session("0930-1600", "Session (New York time)", group = GRP_FLT)
+bool   flatOutside    = input.bool(true, "Flatten Position When Session Ends", group = GRP_FLT)
 
-// --- 5) VISUAL SETTINGS ---
+// --- 5) VISUALS ---
 string GRP_VIS     = "5) Visuals"
-color  colSupFill  = input.color(color.new(color.blue, 75), "Support Zone Fill", group = GRP_VIS)
+bool   showBoxText = input.bool(true, "Show SL/TP Prices in Boxes", group = GRP_VIS)
+bool   showEma     = input.bool(true, "Plot Trend EMA", group = GRP_VIS)
+bool   showSupHist = input.bool(true, "Plot Support History", group = GRP_VIS)
+color  colSupFill  = input.color(color.new(color.blue, 80), "Support Zone Fill", group = GRP_VIS)
 color  colSupLine  = input.color(color.blue, "Support Zone Border", group = GRP_VIS)
-color  colReward   = input.color(color.new(color.blue, 80), "Reward Box (TP area)", group = GRP_VIS)
-color  colRisk     = input.color(color.new(color.gray, 70), "Risk Box (SL area)", group = GRP_VIS)
+color  colReward   = input.color(color.new(color.blue, 82), "Reward Box", group = GRP_VIS)
+color  colRisk     = input.color(color.new(color.gray, 72), "Risk Box", group = GRP_VIS)
 color  colSL       = input.color(color.red, "Stop Loss Line", group = GRP_VIS)
 color  colTP       = input.color(color.green, "Take Profit Line", group = GRP_VIS)
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// --- HELPERS & BASE SERIES ---
+// ═══════════════════════════════════════════════════════════════════════════════
+float tickSize = syminfo.mintick
+
+// Round a price DOWN to the nearest valid tick (stops must sit on real prices).
+roundDown(float p) =>
+    math.floor(p / syminfo.mintick) * syminfo.mintick
+
+float atrVal   = ta.atr(atrLen)
+float emaTrend = ta.ema(close, emaLen)
+bool  useLL    = supportMode == "Lowest Low"
+
+// Session gate.
+bool inSession = not useSession or not na(time(timeframe.period, sessTime, "America/New_York"))
+
+// New trading day -> reset the daily loss counter.
+bool newDay = ta.change(time("D")) != 0
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // --- MARKET CONTEXT & SUPPORT ZONE IDENTIFICATION ---
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// One tick of the instrument (MNQ = 0.25). Used for all "a few ticks" offsets.
-float tickSize = syminfo.mintick
+// Method A — rolling lowest low of the PREVIOUS N bars ([1] excludes this bar).
+float llSupport = ta.lowest(low, supportLen)[1]
 
-// Session gate: true when no filter is used, or when the bar is inside the session.
-bool inSession = not useSession or not na(time(timeframe.period, sessTime, "America/New_York"))
+// Method B — confirmed swing low. ta.pivotlow() returns a value only when a
+// swing low is CONFIRMED (pivRight bars after it formed); otherwise na.
+float pivotFound = ta.pivotlow(low, pivLeft, pivRight)
 
-// KEY SUPPORT LEVEL = lowest low of the PREVIOUS `supportLen` candles.
-// The [1] is critical: it excludes the current candle, otherwise the current
-// candle's own low would BE the support and could never "break below" it.
-float support = ta.lowest(low, supportLen)[1]
+// Persistent state for the active swing-low level.
+var float pivLevel  = na      // price of the active swing low
+var int   pivBar    = na      // bar_index where that swing low printed
+var bool  levelUsed = false   // true once a trade was taken off this level
 
-// Top of the visual blue zone (the level itself is the bottom edge).
-float zoneTop = support + zoneTicks * tickSize
+// The support used by the trigger logic (value as of the START of this bar).
+float support    = useLL ? llSupport : pivLevel
+bool  levelAgeOK = useLL or (not na(pivBar) and bar_index - pivBar >= minLevelAge)
+bool  levelFree  = useLL or not levelUsed
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // --- DETECTING THE LIQUIDITY SWEEP (THE TRAP CANDLE) ---
 // ═══════════════════════════════════════════════════════════════════════════════
+float candleRange = high - low
+float lowerWick   = math.min(open, close) - low
+float sweepDepth  = support - low
 
-// STEP A — Wick below support: the candle's low pierces the key level by at
-// least `minSweepTicks`. This is the stop-loss hunt / liquidity grab.
-// (Evaluated live on every tick, so it powers the "setup forming" alert.)
-bool sweepForming = not na(support) and low <= support - minSweepTicks * tickSize
+// STEP A — Wick below support by at least `minSweepTicks` (the stop hunt).
+bool sweepForming = not na(support) and sweepDepth >= minSweepTicks * tickSize
 
-// STEP B — Close back above support: sellers could not hold price below the
-// level -> failed breakdown. Together with STEP A this is the TRIGGER CANDLE.
-bool triggerCandle = sweepForming and close > support and (not reqBullish or close > open)
+// STEP B — Not too deep (a huge flush through the level is a real breakdown).
+bool depthOK = maxSweepAtr == 0 or sweepDepth <= maxSweepAtr * atrVal
 
+// STEP C — Real rejection: long lower wick and close in the upper part of the bar.
+bool wickOK  = candleRange > 0 and lowerWick / candleRange * 100 >= minWickPct
+bool closeOK = candleRange > 0 and (close - low) / candleRange * 100 >= minClosePos
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// --- RISK CALCULATION FOR THE SIGNAL ---
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Stop Loss sits strictly BELOW the trigger candle's wick, minus a tick buffer.
-float sigSL = low - slBufferTicks * tickSize
-
-// Estimated risk (the real fill is next candle's open, which on 1m is almost
-// always the same as this close). Used only for the max-risk filter.
-float estRisk = close - sigSL
-
-// Risk filter: valid positive risk, and not wider than the user's max.
-bool riskOK = estRisk > 0 and (maxRiskTicks == 0 or estRisk <= maxRiskTicks * tickSize)
-
-// FINAL LONG SETUP: trigger candle + acceptable risk + session OK + flat.
-// barstate.isconfirmed => only act once the trigger candle has CLOSED.
-bool longSetup = triggerCandle and riskOK and inSession and strategy.position_size == 0 and barstate.isconfirmed
+// STEP D — Close back ABOVE support (failed breakdown).
+bool triggerCandle = sweepForming and depthOK and wickOK and closeOK and close > support and levelAgeOK and levelFree
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// --- PERSISTENT TRADE STATE (survives from bar to bar) ---
+// --- STOP LOSS / RISK CALCULATION ---
 // ═══════════════════════════════════════════════════════════════════════════════
-var float tradeSL     = na      // Stop Loss price of the current trade
-var float tradeTP     = na      // Take Profit price of the current trade
-var float tradeEntry  = na      // Actual fill price
-var float trigLow     = na      // Low of the trigger candle (invalidation level)
-var bool  tracking    = false   // true while we are managing / drawing a trade
-var int   entryBarIdx = na      // bar_index of the entry candle
-var box   rewardBox   = na      // blue box  : Entry -> TP
-var box   riskBox     = na      // gray box  : SL    -> Entry
-var line  slLine      = na      // red line  : Stop Loss
-var line  tpLine      = na      // green line: Take Profit
+// Natural stop: under the trigger wick minus a tick buffer.
+float naturalSL   = low - slBufferTicks * tickSize
+// ATR floor: never risk less than minStopAtr x ATR (noise protection).
+float minStopDist = minStopAtr * atrVal
+float sigSL       = roundDown((close - naturalSL) < minStopDist ? close - minStopDist : naturalSL)
+float estRisk     = close - sigSL
+bool  riskOK      = estRisk > 0 and (maxStopAtr == 0 or estRisk <= maxStopAtr * atrVal)
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// --- ENTRY ORDER: SENT WHEN THE TRIGGER CANDLE CLOSES ---
+// --- FILTERS: TREND, COOLDOWN, DAILY LOSS LIMIT ---
 // ═══════════════════════════════════════════════════════════════════════════════
-// strategy.entry() at bar close is filled by TradingView at the NEXT candle's
-// OPEN — this is the "buy on the open of the very next candle" rule.
+var int lossesToday = 0
+var int lastLossBar = na
+if newDay
+    lossesToday := 0
+
+bool trendOK    = not useTrend or close > emaTrend
+bool cooldownOK = na(lastLossBar) or bar_index - lastLossBar > cooldownBars
+bool dailyOK    = maxDailyLosses == 0 or lossesToday < maxDailyLosses
+
+// FINAL LONG SETUP — only on a CLOSED trigger candle, while flat.
+bool longSetup = triggerCandle and riskOK and trendOK and cooldownOK and dailyOK and inSession and strategy.position_size == 0 and barstate.isconfirmed
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// --- PERSISTENT TRADE STATE ---
+// ═══════════════════════════════════════════════════════════════════════════════
+var float tradeSL     = na
+var float tradeTP     = na
+var float tradeEntry  = na
+var float trigLow     = na
+var bool  tracking    = false
+var bool  beDone      = false
+var int   entryBarIdx = na
+var box   rewardBox   = na
+var box   riskBox     = na
+var line  slLine      = na
+var line  tpLine      = na
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// --- ENTRY: SENT WHEN THE TRIGGER CANDLE CLOSES (fills next candle's open) ---
+// ═══════════════════════════════════════════════════════════════════════════════
 if longSetup
     tradeSL := sigSL
     trigLow := low
-    // Provisional TP (based on the close). Re-centred on the real fill below.
-    float estTP = close + rrRatio * estRisk
-    strategy.entry("Long", strategy.long, qty = qtyContracts, comment = "Sweep Long")
-    // Bracket attached immediately so the entry candle is already protected.
+    float estTP = math.round_to_mintick(close + rrRatio * estRisk)
+    strategy.entry("Long", strategy.long, qty = qtyContracts, comment = "Long")
+    // Bracket attached immediately so the entry candle is protected.
     strategy.exit("Long Exit", from_entry = "Long", stop = sigSL, limit = estTP, comment_loss = "SL", comment_profit = "TP")
-    // --- ALERT #2: LONG ENTRY TRIGGER (trigger candle closed above support) ---
-    alert("MNQ Sweep | LONG ENTRY TRIGGER on " + syminfo.ticker + " | Buy next open | SL " + str.tostring(sigSL, format.mintick) + " | TP ~" + str.tostring(estTP, format.mintick) + " | RR 1:" + str.tostring(rrRatio), alert.freq_once_per_bar_close)
+    if not useLL
+        levelUsed := true   // one trade per swing level
+    // --- ALERT: LONG ENTRY TRIGGER ---
+    alert("MNQ Sweep | LONG ENTRY on " + syminfo.ticker + " | Buy next open | SL " + str.tostring(sigSL, format.mintick) + " | TP ~" + str.tostring(estTP, format.mintick) + " | RR 1:" + str.tostring(rrRatio), alert.freq_once_per_bar_close)
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// --- DETECTING THE ACTUAL FILL (THE CONFIRMATION / ENTRY CANDLE) ---
+// --- SUPPORT LEVEL MAINTENANCE (runs AFTER the trigger check) ---
 // ═══════════════════════════════════════════════════════════════════════════════
-// Total trades ever opened. When it increases, a new position was filled on
-// this candle (works even if the trade opens AND closes on the same candle).
+if not useLL and barstate.isconfirmed
+    // A CLOSE below the level = accepted breakdown -> level is dead.
+    if not na(pivLevel) and close < pivLevel
+        pivLevel  := na
+        pivBar    := na
+    // A newly confirmed swing low becomes the new key support.
+    if not na(pivotFound)
+        pivLevel  := pivotFound
+        pivBar    := bar_index - pivRight
+        levelUsed := false
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// --- DETECTING THE FILL (ENTRY CANDLE) & RE-CENTRING SL/TP ---
+// ═══════════════════════════════════════════════════════════════════════════════
 int  tradeCount = strategy.opentrades + strategy.closedtrades
 bool newTrade   = tradeCount > nz(tradeCount[1])
 
 if newTrade
-    // Real fill price (includes slippage), from the open or the just-closed trade.
     tradeEntry := strategy.opentrades > 0 ? strategy.opentrades.entry_price(strategy.opentrades - 1) : strategy.closedtrades.entry_price(strategy.closedtrades - 1)
-    // FINAL TAKE PROFIT = Entry + RR x (Entry - SL)
-    tradeTP := tradeEntry + rrRatio * (tradeEntry - tradeSL)
+    tradeTP    := math.round_to_mintick(tradeEntry + rrRatio * (tradeEntry - tradeSL))
+    beDone     := false
 
     if strategy.position_size > 0 and barstate.isconfirmed
-        // ENTRY CONDITION CHECK: the entry candle must trade ABOVE the trigger
-        // candle's low. If it gapped open below it, the setup is invalid -> exit.
+        // Entry candle must open ABOVE the trigger low, otherwise invalid.
         if open <= trigLow
-            strategy.close("Long", comment = "Invalid: opened below trigger low")
+            strategy.close("Long", comment = "Invalid")
         else
-            // Re-centre the bracket on the real fill so RR is exact.
             strategy.exit("Long Exit", from_entry = "Long", stop = tradeSL, limit = tradeTP, comment_loss = "SL", comment_profit = "TP")
 
-    // --- VISUALIZING RISK / REWARD (blue + gray zones extending right) ---
+    // --- RISK / REWARD BOXES + SL / TP LINES ---
     int rightEdge = bar_index + projBars
-    rewardBox := box.new(left = bar_index, top = tradeTP, right = rightEdge, bottom = tradeEntry, border_color = colTP, bgcolor = colReward, text = "TP 1:" + str.tostring(rrRatio) + "  " + str.tostring(tradeTP, format.mintick), text_size = size.small, text_color = colTP, text_halign = text.align_right, text_valign = text.align_top)
-    riskBox   := box.new(left = bar_index, top = tradeEntry, right = rightEdge, bottom = tradeSL, border_color = colSL, bgcolor = colRisk, text = "SL  " + str.tostring(tradeSL, format.mintick), text_size = size.small, text_color = colSL, text_halign = text.align_right, text_valign = text.align_bottom)
-    // --- SL / TP LINES (red = stop, green = target) ---
-    slLine := line.new(bar_index, tradeSL, rightEdge, tradeSL, color = colSL, width = 2)
-    tpLine := line.new(bar_index, tradeTP, rightEdge, tradeTP, color = colTP, width = 2)
+    rewardBox := box.new(bar_index, tradeTP, rightEdge, tradeEntry, border_color = color.new(colTP, 50), bgcolor = colReward, text = showBoxText ? "TP " + str.tostring(tradeTP, format.mintick) : "", text_size = size.tiny, text_color = colTP, text_halign = text.align_right, text_valign = text.align_top)
+    riskBox   := box.new(bar_index, tradeEntry, rightEdge, tradeSL, border_color = color.new(colSL, 50), bgcolor = colRisk, text = showBoxText ? "SL " + str.tostring(tradeSL, format.mintick) : "", text_size = size.tiny, text_color = colSL, text_halign = text.align_right, text_valign = text.align_bottom)
+    slLine    := line.new(bar_index, tradeSL, rightEdge, tradeSL, color = colSL, width = 2)
+    tpLine    := line.new(bar_index, tradeTP, rightEdge, tradeTP, color = colTP, width = 2)
     tracking    := true
     entryBarIdx := bar_index
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// --- LIVE TRADE MANAGEMENT VISUALS & EXIT MARKERS ---
+// --- OPTIONAL BREAKEVEN MOVE ---
+// ═══════════════════════════════════════════════════════════════════════════════
+if beAtR > 0 and strategy.position_size > 0 and not beDone and barstate.isconfirmed and high >= tradeEntry + beAtR * (tradeEntry - tradeSL)
+    float beStop = tradeEntry + tickSize
+    strategy.exit("Long Exit", from_entry = "Long", stop = beStop, limit = tradeTP, comment_loss = "BE", comment_profit = "TP")
+    line.set_y1(slLine, beStop)
+    line.set_y2(slLine, beStop)
+    beDone := true
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// --- LIVE TRADE VISUALS & EXIT MARKERS ---
 // ═══════════════════════════════════════════════════════════════════════════════
 if tracking
-    // Keep boxes/lines stretching right while the trade is still open.
     int edge = math.max(entryBarIdx + projBars, bar_index)
     box.set_right(rewardBox, edge)
     box.set_right(riskBox, edge)
     line.set_x2(slLine, edge)
     line.set_x2(tpLine, edge)
 
-    // Position is flat again -> trade finished (TP, SL, invalidation or session end).
     if strategy.position_size == 0
         tracking := false
-        // Trim the drawings so they end exactly on the exit candle.
         box.set_right(rewardBox, bar_index)
         box.set_right(riskBox, bar_index)
         line.set_x2(slLine, bar_index)
         line.set_x2(tpLine, bar_index)
-        // Win / loss label at the real exit price.
         int   lastIdx = strategy.closedtrades - 1
         float pnl     = strategy.closedtrades.profit(lastIdx)
         float exitPx  = strategy.closedtrades.exit_price(lastIdx)
-        bool  isWin   = pnl > 0
-        label.new(bar_index, exitPx, isWin ? "TP ✔" : "SL ✖", style = isWin ? label.style_label_down : label.style_label_up, color = isWin ? colTP : colSL, textcolor = color.white, size = size.small)
+        // Loss bookkeeping for cooldown + daily limit.
+        if pnl < 0
+            lossesToday += 1
+            lastLossBar := bar_index
+        string res = pnl > 0 and exitPx >= tradeTP - tickSize ? "✔" : pnl > 0 ? "BE" : "✖"
+        label.new(bar_index, exitPx, res, style = pnl > 0 ? label.style_label_down : label.style_label_up, color = pnl > 0 ? colTP : colSL, textcolor = color.white, size = size.tiny)
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // --- SESSION END: FLATTEN ---
 // ═══════════════════════════════════════════════════════════════════════════════
 if useSession and flatOutside and not inSession and strategy.position_size > 0 and barstate.isconfirmed
-    strategy.close_all(comment = "Session End")
+    strategy.close_all(comment = "EOD")
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// --- DRAWING THE KEY SUPPORT ZONE (blue box, extended to the right) ---
+// --- KEY SUPPORT ZONE BOX (blue, extended right) ---
 // ═══════════════════════════════════════════════════════════════════════════════
-// A single box object is created once and then moved every bar so it always
-// shows the CURRENT key support, starting where the lookback window begins.
+float curSupport = useLL ? llSupport : pivLevel
+int   zoneLeft   = useLL ? bar_index - supportLen : nz(pivBar, bar_index)
 var box supBox = na
-if not na(support)
+if not na(curSupport)
     if na(supBox)
-        supBox := box.new(left = bar_index - supportLen, top = zoneTop, right = bar_index, bottom = support, border_color = colSupLine, bgcolor = colSupFill, extend = extend.right, text = "Key Support (Liquidity)", text_size = size.small, text_color = colSupLine, text_halign = text.align_right)
+        supBox := box.new(zoneLeft, curSupport + zoneTicks * tickSize, bar_index, curSupport, border_color = colSupLine, bgcolor = colSupFill, extend = extend.right, text = "Key Support", text_size = size.tiny, text_color = colSupLine, text_halign = text.align_right)
     else
-        box.set_lefttop(supBox, bar_index - supportLen, zoneTop)
-        box.set_rightbottom(supBox, bar_index, support)
+        box.set_lefttop(supBox, zoneLeft, curSupport + zoneTicks * tickSize)
+        box.set_rightbottom(supBox, bar_index, curSupport)
+        box.set_extend(supBox, extend.right)
+else if not na(supBox)
+    // Level was broken -> hide the zone until a new swing low confirms.
+    box.set_extend(supBox, extend.none)
+    box.set_right(supBox, bar_index)
 
-// Historical support level as a blue step line (shows where past sweeps happened).
-plot(showSupHist ? support : na, "Support Level", color = color.new(color.blue, 40), style = plot.style_stepline)
+plot(showSupHist ? curSupport : na, "Support Level", color = color.new(color.blue, 40), style = plot.style_linebr)
+plot(showEma and useTrend ? emaTrend : na, "Trend EMA", color = color.new(color.orange, 30))
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // --- CHART SIGNALS ---
 // ═══════════════════════════════════════════════════════════════════════════════
-// Orange diamond under every trigger candle (wick below + close above support).
-plotshape(triggerCandle and barstate.isconfirmed, "Liquidity Sweep (Trigger Candle)", shape.diamond, location.belowbar, color.orange, size = size.tiny)
-// Green "Buy" arrow under the confirmation candle where the long was filled.
-plotshape(newTrade, "Buy", shape.triangleup, location.belowbar, color.green, size = size.small, text = "Buy", textcolor = color.green)
+// Small orange diamond = valid trap candle (taken or filtered out by trend/cooldown).
+plotshape(triggerCandle and barstate.isconfirmed, "Trap Candle", shape.diamond, location.belowbar, color.orange, size = size.tiny)
+// Green arrow = the confirmation candle where the long was filled.
+plotshape(newTrade, "Buy", shape.triangleup, location.belowbar, color.green, size = size.small)
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// --- ALERT #1: SETUP FORMING (price is wicking below support right now) ---
+// --- ALERT: SETUP FORMING (price wicking below support right now) ---
 // ═══════════════════════════════════════════════════════════════════════════════
-// Fires intrabar (thanks to calc_on_every_tick) once per candle, so you get a
-// heads-up BEFORE the candle closes. Alert #2 (entry) is inside the entry block.
-if sweepForming and strategy.position_size == 0 and inSession
-    alert("MNQ Sweep | SETUP FORMING on " + syminfo.ticker + " | Price wicked below support " + str.tostring(support, format.mintick) + " | Watch for close back above", alert.freq_once_per_bar)
+if sweepForming and levelFree and strategy.position_size == 0 and inSession
+    alert("MNQ Sweep | SETUP FORMING on " + syminfo.ticker + " | Wick below support " + str.tostring(support, format.mintick) + " | Watch for close back above", alert.freq_once_per_bar)
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// --- TIMEFRAME CHECK (this setup is built for the 1-minute chart) ---
+// --- TIMEFRAME CHECK (bottom-right, so it never covers the symbol title) ---
 // ═══════════════════════════════════════════════════════════════════════════════
-var table infoTbl = table.new(position.top_right, 1, 1, bgcolor = color.new(color.black, 30))
+var table infoTbl = table.new(position.bottom_right, 1, 1, bgcolor = color.new(color.black, 30))
 if barstate.islast
     bool   isOneMin = timeframe.period == "1"
-    string tfMsg    = isOneMin ? "MNQ Liquidity Sweep • 1m ✔ • RR 1:" + str.tostring(rrRatio) : "⚠ Built for the 1-minute chart (current: " + timeframe.period + ")"
+    string tfMsg    = isOneMin ? "MNQ Sweep • 1m ✔ • RR 1:" + str.tostring(rrRatio) : "⚠ Built for 1m (current: " + timeframe.period + ")"
     table.cell(infoTbl, 0, 0, tfMsg, text_color = isOneMin ? color.white : color.orange, text_size = size.small)
