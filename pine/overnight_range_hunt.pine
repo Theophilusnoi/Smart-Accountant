@@ -214,8 +214,10 @@ plotshape(tapH, "OVN High Tap", shape.triangledown, location.abovebar, color.gre
 plotshape(tapL, "OVN Low Tap",  shape.triangleup,   location.belowbar, color.red,   size=size.tiny)
 
 if showLbl and rthStartBar and levelsReady and barstate.isconfirmed
-    txt = dayDir == 1 ? "LONG → OVN H" : dayDir == -1 ? "SHORT → OVN L" : "NO TRADE"
-    col = dayDir == 1 ? color.green : dayDir == -1 ? color.red : color.gray
+    skipped = dayDir != 0 and not targetUntouched
+    txt = skipped ? (dayDir == 1 ? "LONG bias - SKIP\n(OVN H hit on open bar)" : "SHORT bias - SKIP\n(OVN L hit on open bar)") :
+         dayDir == 1 ? "LONG → OVN H" : dayDir == -1 ? "SHORT → OVN L" : "NO TRADE"
+    col = skipped ? color.gray : dayDir == 1 ? color.green : dayDir == -1 ? color.red : color.gray
     label.new(bar_index, dayDir == -1 ? high : low, txt, color=col, textcolor=color.white,
          style=dayDir == -1 ? label.style_label_down : label.style_label_up, size=size.small)
 
