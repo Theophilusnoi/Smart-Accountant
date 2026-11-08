@@ -6,6 +6,17 @@ with a full strategy backtester added on top.
 
 Open `index.html` in any modern browser. No install, no server, no account.
 
+## Pages
+- **Welcome** (`#welcome`): landing page with an animated flow-bar preview, features, how it works and a Pine import showcase.
+- **Sign up** (`#signup`) and **Log in** (`#login`): validation, password strength meter, show/hide password, "keep me logged in".
+  A "Try it without an account" option opens the app as a guest.
+- **Welcome aboard** (`#start`): shown after sign-up, with shortcuts to sample data, live crypto, or custom rules / Pine import.
+- **App** (`#app`): the backtester. Presets and last settings are stored per account.
+
+Accounts are stored only in this browser (localStorage). Passwords are hashed on-device with PBKDF2-SHA256 and never sent
+anywhere. This keeps casual eyes out of a personal app but is not server-grade security; anyone with access to the browser
+profile can clear or bypass it. Real multi-device accounts would need a backend (e.g. Supabase or Firebase Auth).
+
 ## Features
 - **Data**: synthetic sample data, live Binance klines (real taker buy/sell volume → measured delta), or your own CSV
   (TradingView, NinjaTrader `YYYYMMDD HHMMSS`, Yahoo, unix timestamps). Without buy volume, delta is estimated

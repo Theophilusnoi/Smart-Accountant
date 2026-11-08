@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>FlowDesk Backtester</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -124,11 +125,313 @@ tr.click { cursor: pointer; }
 .toast { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--brass); border-radius: 4px; padding: 10px 12px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
 .toast.long { border-left-color: var(--up); } .toast.short { border-left-color: var(--down); }
 @media (prefers-reduced-motion: no-preference) { .toast { animation: slide .2s ease-out; } @keyframes slide { from { transform: translateY(8px); opacity: .4; } } }
+/* ============================== Welcome, auth & onboarding views ============================== */
+.view-pad { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.wrap { max-width: 1180px; margin: 0 auto; }
+.lnav { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 6; background: rgba(15,22,32,.82); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.lnav .wrap { display: flex; align-items: center; gap: 20px; padding-block: 12px; flex-wrap: wrap; }
+.lnav a.l { color: var(--muted); text-decoration: none; font-size: 14px; }
+.lnav a.l:hover { color: var(--text); }
+.lnav .sp { flex: 1; }
+.lnav .links { display: flex; gap: 20px; }
+@media (max-width: 720px) { .lnav .links { display: none; } }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; color: var(--text); }
+a.btn.primary { color: #1a1408; }
+.btn.lg { padding: 12px 20px; font-size: 15px; border-radius: 5px; }
+
+.hero .wrap { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 48px; align-items: center; padding-block: 64px 48px; }
+@media (max-width: 920px) { .hero .wrap { grid-template-columns: minmax(0, 1fr); gap: 32px; padding-block: 40px 32px; } }
+.eyebrow { font-family: var(--font-data); font-size: 12px; color: var(--brass); letter-spacing: .06em; text-transform: uppercase; display: inline-flex; align-items: center; gap: 8px; }
+.eyebrow::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--up); box-shadow: 0 0 0 4px rgba(63,182,160,.18); }
+.hero h1 { font-family: var(--font-display); font-weight: 600; font-size: clamp(36px, 5.6vw, 64px); line-height: 1.02; letter-spacing: -.01em; margin: 16px 0 18px; text-wrap: balance; }
+.hero h1 .buy { color: var(--up); } .hero h1 .sell { color: var(--down); }
+.hero h1 em { font-style: normal; color: var(--brass); position: relative; white-space: nowrap; }
+.hero h1 em::after { content: ""; position: absolute; left: 0; right: 0; bottom: .06em; height: .09em; background: var(--brass); opacity: .45; }
+.lede { font-size: 18px; color: var(--muted); max-width: 34em; margin: 0 0 28px; }
+.cta-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.meta-row { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 22px; font-family: var(--font-data); font-size: 12px; color: var(--muted); }
+.meta-row span::before { content: "✓ "; color: var(--up); }
+
+.term { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; box-shadow: 0 30px 80px -30px rgba(0,0,0,.7), 0 0 0 1px rgba(224,169,67,.05); position: relative; }
+.term-bar { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); font-family: var(--font-data); font-size: 11px; color: var(--muted); }
+.term-bar i { width: 9px; height: 9px; border-radius: 50%; background: var(--line); display: inline-block; }
+.term-bar .live { margin-left: auto; color: var(--up); }
+.term canvas { display: block; width: 100%; height: 340px; }
+@media (max-width: 600px) { .term canvas { height: 260px; } }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-top: 1px solid var(--line); }
+.chip { background: rgba(15,22,32,.88); border: 1px solid var(--line); border-radius: 5px; padding: 6px 9px; font-family: var(--font-data); font-size: 12px; }
+.chip b { font-weight: 500; } .chip small { color: var(--muted); font-size: 10px; margin-left: 4px; }
+
+.tape { border-block: 1px solid var(--line); background: var(--panel); overflow: hidden; white-space: nowrap; }
+.tape-in { display: inline-flex; gap: 40px; padding-block: 12px; font-family: var(--font-data); font-size: 13px; color: var(--muted); }
+.tape-in span b { color: var(--text); font-weight: 500; margin-right: 6px; }
+@media (prefers-reduced-motion: no-preference) { .tape-in { animation: tape 40s linear infinite; } @keyframes tape { to { transform: translateX(-50%); } } }
+
+.sec .wrap { padding-block: 72px; }
+@media (max-width: 720px) { .sec .wrap { padding-block: 48px; } }
+.sec h2 { font-family: var(--font-display); font-weight: 600; font-size: clamp(26px, 3.4vw, 38px); line-height: 1.1; margin: 10px 0 12px; text-wrap: balance; max-width: 22em; }
+.sec .sub { color: var(--muted); font-size: 16px; max-width: 40em; margin: 0 0 36px; }
+.fgrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+@media (max-width: 900px) { .fgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .fgrid { grid-template-columns: minmax(0, 1fr); } }
+.feat { background: var(--panel); padding: 24px; display: grid; gap: 8px; align-content: start; }
+.feat svg { width: 28px; height: 28px; }
+.feat h3 { font-family: var(--font-display); font-weight: 600; font-size: 17px; margin: 6px 0 0; }
+.feat p { margin: 0; color: var(--muted); font-size: 14px; }
+.feat code { font-family: var(--font-data); font-size: 12px; color: var(--brass); }
+
+.steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; counter-reset: st; }
+@media (max-width: 800px) { .steps { grid-template-columns: minmax(0, 1fr); } }
+.step { border-top: 2px solid var(--line); padding-top: 16px; counter-increment: st; }
+.step::before { content: "Step " counter(st); font-family: var(--font-data); font-size: 12px; color: var(--brass); letter-spacing: .05em; }
+.step h3 { font-family: var(--font-display); font-weight: 600; font-size: 19px; margin: 8px 0 6px; }
+.step p { margin: 0; color: var(--muted); }
+
+.pine { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 16px; align-items: stretch; }
+@media (max-width: 860px) { .pine { grid-template-columns: minmax(0, 1fr); } .pine .arrow { transform: rotate(90deg); justify-self: center; } }
+.code { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; min-width: 0; }
+.code .cap { font-family: var(--font-data); font-size: 11px; color: var(--muted); padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.code pre { margin: 0; padding: 14px; overflow-x: auto; font-family: var(--font-data); font-size: 12.5px; line-height: 1.6; color: var(--text); }
+.code .k { color: #c58af0; } .code .f { color: var(--brass); } .code .n { color: #9aa9ff; } .code .c { color: var(--muted); }
+.arrow { align-self: center; font-family: var(--font-data); color: var(--brass); font-size: 26px; }
+
+.band { background: linear-gradient(120deg, rgba(224,169,67,.14), rgba(63,182,160,.10)); border-block: 1px solid var(--line); }
+.band .wrap { padding-block: 56px; display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.band h2 { margin: 0; }
+.foot .wrap { padding-block: 28px; display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between; color: var(--muted); font-size: 12px; }
+.foot p { margin: 0; max-width: 60em; }
+
+/* auth */
+.auth { min-height: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+@media (max-width: 880px) { .auth { grid-template-columns: minmax(0, 1fr); } .auth .art { display: none; } }
+.auth .formside { display: grid; align-content: center; justify-items: center; padding-block: 40px; }
+.auth .card { width: 100%; max-width: 400px; display: grid; gap: 18px; }
+.auth h1 { font-family: var(--font-display); font-weight: 600; font-size: 32px; margin: 0; line-height: 1.1; }
+.auth .muted { color: var(--muted); margin: 0; }
+.auth form { display: grid; gap: 14px; }
+.fld { display: grid; gap: 5px; }
+.fld > label { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; }
+.fld input[type=text], .fld input[type=email], .fld input[type=password] { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 11px 12px; font-size: 15px; width: 100%; }
+.fld input:focus { border-color: var(--brass); outline: none; box-shadow: 0 0 0 3px rgba(224,169,67,.18); }
+.fld input[aria-invalid="true"] { border-color: var(--down); }
+.fld .msg { font-size: 12px; color: var(--down); min-height: 0; }
+.pw { position: relative; }
+.pw input { padding-right: 64px !important; }
+.pw button { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: transparent; border: 0; color: var(--muted); font-size: 12px; cursor: pointer; padding: 6px 8px; }
+.meter { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.meter i { display: block; height: 100%; width: 0; background: var(--down); transition: width .2s, background .2s; }
+.meter-l { font-size: 11px; color: var(--muted); }
+.auth .full { width: 100%; padding: 12px; font-size: 15px; }
+.or { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.formerr { background: rgba(224,102,90,.1); border: 1px solid rgba(224,102,90,.4); color: var(--text); border-radius: 6px; padding: 10px 12px; font-size: 13px; margin: 0; }
+.note { background: rgba(224,169,67,.08); border: 1px solid rgba(224,169,67,.3); border-radius: 6px; padding: 10px 12px; font-size: 13px; margin: 0; }
+.auth a { color: var(--brass); }
+.auth .art { position: relative; background: var(--panel); border-left: 1px solid var(--line); overflow: hidden; display: grid; align-content: end; }
+.auth .art canvas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .9; }
+.auth .art .quote { position: relative; margin: 32px; padding: 20px 22px; background: rgba(15,22,32,.86); border: 1px solid var(--line); border-radius: 8px; max-width: 30em; }
+.auth .art .quote h2 { font-family: var(--font-display); font-weight: 600; font-size: 22px; margin: 0 0 10px; }
+.auth .art ul { margin: 0; padding-left: 18px; color: var(--muted); display: grid; gap: 4px; }
+.authtop { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 400px; margin-bottom: 28px; }
+.authtop a { color: var(--muted); text-decoration: none; font-size: 13px; }
+
+/* onboarding */
+.onb .wrap { max-width: 920px; padding-block: 64px; display: grid; gap: 28px; }
+.onb h1 { font-family: var(--font-display); font-weight: 600; font-size: clamp(30px, 4.4vw, 46px); margin: 0; line-height: 1.05; }
+.onb h1 span { color: var(--brass); }
+.ocards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 760px) { .ocards { grid-template-columns: minmax(0, 1fr); } }
+.ocard { text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; cursor: pointer; display: grid; gap: 8px; align-content: start; transition: border-color .15s, transform .15s; }
+.ocard:hover { border-color: var(--brass); }
+@media (prefers-reduced-motion: no-preference) { .ocard:hover { transform: translateY(-2px); } }
+.ocard h3 { font-family: var(--font-display); font-weight: 600; font-size: 18px; margin: 0; }
+.ocard p { margin: 0; color: var(--muted); font-size: 14px; }
+.ocard .go { font-family: var(--font-data); font-size: 12px; color: var(--brass); margin-top: 4px; }
+.tips { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 24px; color: var(--muted); font-size: 14px; margin: 0; padding-left: 18px; }
+
+/* app header user menu */
+.userbox { display: flex; align-items: center; gap: 10px; }
+.avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--brass); color: #1a1408; display: grid; place-items: center; font-family: var(--font-display); font-weight: 600; font-size: 13px; }
+.userbox .nm { font-size: 13px; }
+.userbox a, .userbox button.link { color: var(--muted); font-size: 13px; background: none; border: 0; cursor: pointer; text-decoration: none; padding: 0; }
+.userbox a:hover, .userbox button.link:hover { color: var(--text); }
 </style>
 
+<!-- ============================== Welcome (landing) ============================== -->
+<div id="view-welcome" class="view">
+  <nav class="lnav view-pad"><div class="wrap">
+    <a href="#welcome" class="brand" style="text-decoration:none;color:var(--text)"><b>Flow</b>Desk</a>
+    <div class="links"><a class="l" href="#features" data-scroll="features">Features</a><a class="l" href="#how" data-scroll="how">How it works</a><a class="l" href="#pine" data-scroll="pine">Pine import</a></div>
+    <span class="sp"></span>
+    <span data-guest><a class="l" href="#login">Log in</a></span>
+    <a class="btn primary" href="#signup" data-guest>Get started</a>
+    <a class="btn primary" href="#app" data-member hidden>Open the app</a>
+  </div></nav>
+
+  <header class="hero view-pad"><div class="wrap">
+    <div>
+      <span class="eyebrow">Order flow × backtesting</span>
+      <h1>See who's <span class="buy">buying</span>, who's <span class="sell">selling</span>, and <em>prove the edge</em> before you trade.</h1>
+      <p class="lede">FlowDesk colours every bar by aggressive buying and selling, then backtests your setups on years of data in seconds. Bring your own rules or paste a TradingView strategy.</p>
+      <div class="cta-row">
+        <a class="btn primary lg" href="#signup" data-guest>Create your free account</a>
+        <a class="btn lg" href="#login" data-guest>Log in</a>
+        <a class="btn primary lg" href="#app" data-member hidden>Open the app</a>
+      </div>
+      <div class="meta-row"><span>Runs in your browser</span><span>Your data stays on this device</span><span>No card, no install</span></div>
+    </div>
+    <div class="term" aria-label="Animated example of flow-coloured bars with delta">
+      <div class="term-bar"><i></i><i></i><i></i><span>BTCUSDT · 1h · sample data</span><span class="live">● replaying</span></div>
+      <canvas id="heroCanvas"></canvas>
+      <div class="chips"><span class="chip">Delta <b class="pos" id="chipDelta">+0%</b></span><span class="chip">Profit factor <b>1.83</b><small>sample</small></span><span class="chip">Max DD <b class="neg">−8.5%</b><small>sample</small></span><span class="chip">Win rate <b>53%</b><small>sample</small></span></div>
+    </div>
+  </div></header>
+
+  <div class="tape" aria-hidden="true"><div class="tape-in" id="tape"></div></div>
+
+  <section class="sec view-pad" id="features"><div class="wrap">
+    <span class="eyebrow">What's inside</span>
+    <h2>A trading desk's toolkit, sized for one trader.</h2>
+    <p class="sub">Everything runs locally, from the order-flow maths to the optimizer, so you can test ideas as fast as you have them.</p>
+    <div class="fgrid">
+      <div class="feat"><svg viewBox="0 0 28 28" fill="none"><rect x="4" y="9" width="5" height="12" rx="1" fill="#3fd6b8"/><rect x="11.5" y="5" width="5" height="18" rx="1" fill="#ff7a6b"/><rect x="19" y="11" width="5" height="9" rx="1" fill="#6c7b88"/></svg><h3>Flow-coloured bars</h3><p>Candles light up when buyers or sellers hit the market hard on above-average volume. Balanced bars fade to grey.</p></div>
+      <div class="feat"><svg viewBox="0 0 28 28" fill="none"><path d="M3 20h22" stroke="#24323f" stroke-width="2"/><path d="M6 20v-6M10 20v-9M14 20v4M18 20v-7M22 20v-11" stroke="#3fb6a0" stroke-width="2.4"/><path d="M3 15 9 11l5 3 5-6 6 2" stroke="#e0a943" stroke-width="1.8" fill="none"/></svg><h3>Delta &amp; cumulative delta</h3><p>Measured from real taker volume on Binance, or estimated from your CSV. Spot divergence when price and buyers disagree.</p></div>
+      <div class="feat"><svg viewBox="0 0 28 28" fill="none"><rect x="4" y="5" width="20" height="18" rx="2" stroke="#9aa9ff" stroke-width="2"/><path d="M8 11h8M8 15h12M8 19h6" stroke="#9aa9ff" stroke-width="2"/></svg><h3>Setups or your own rules</h3><p>Seven ready-made setups, or write formulas like <code>crossUp(macd(close), macdSignal(close))</code>.</p></div>
+      <div class="feat"><svg viewBox="0 0 28 28" fill="none"><path d="M4 22 11 14l4 4 9-11" stroke="#3fb6a0" stroke-width="2.2" fill="none"/><path d="M4 18h20" stroke="#e0665a" stroke-width="1.6" stroke-dasharray="3 3"/></svg><h3>A real risk engine</h3><p>ATR stops, R-multiple targets, breakeven, trailing stops, % risk sizing, commission and slippage.</p></div>
+      <div class="feat"><svg viewBox="0 0 28 28" fill="none"><g fill="#3fb6a0"><rect x="4" y="4" width="6" height="6" opacity=".3"/><rect x="11" y="4" width="6" height="6" opacity=".7"/><rect x="18" y="4" width="6" height="6" opacity=".5"/><rect x="4" y="11" width="6" height="6" opacity=".8"/><rect x="11" y="11" width="6" height="6"/><rect x="18" y="11" width="6" height="6" opacity=".4"/></g><g fill="#e0665a"><rect x="4" y="18" width="6" height="6" opacity=".5"/><rect x="11" y="18" width="6" height="6" opacity=".3"/></g><rect x="18" y="18" width="6" height="6" fill="#3fb6a0" opacity=".2"/></svg><h3>Optimizer that checks itself</h3><p>Grid-search two parameters, then see if the winners hold up on data they never saw.</p></div>
+      <div class="feat"><svg viewBox="0 0 28 28" fill="none"><path d="M14 4a7 7 0 0 0-7 7v5l-2 3h18l-2-3v-5a7 7 0 0 0-7-7Z" stroke="#e0a943" stroke-width="2"/><path d="M11 22a3 3 0 0 0 6 0" stroke="#e0a943" stroke-width="2"/></svg><h3>Replay &amp; live alerts</h3><p>Step through history bar by bar, or watch a symbol live and get a sound and notification when your setup fires.</p></div>
+    </div>
+  </div></section>
+
+  <section class="sec view-pad" id="how" style="background:var(--panel);border-block:1px solid var(--line)"><div class="wrap">
+    <span class="eyebrow">How it works</span>
+    <h2>From idea to verdict in about a minute.</h2>
+    <p class="sub">No coding environment, no data subscriptions, no waiting.</p>
+    <div class="steps">
+      <div class="step"><h3>Load a market</h3><p>Pull live crypto from Binance, drop in a CSV from TradingView or NinjaTrader, or start with sample data.</p></div>
+      <div class="step"><h3>Choose your setup</h3><p>Pick an order-flow or classic setup, write your own rules, or paste a Pine Script strategy. Set your stop, target and risk.</p></div>
+      <div class="step"><h3>Read the results</h3><p>Equity curve, drawdown, 25+ statistics, every trade on the chart. Then optimize, replay, or set a live alert.</p></div>
+    </div>
+  </div></section>
+
+  <section class="sec view-pad" id="pine"><div class="wrap">
+    <span class="eyebrow">TradingView friendly</span>
+    <h2>Paste a Pine Script strategy. Get a backtest.</h2>
+    <p class="sub">Inputs, variables, if/else blocks, MACD, Bollinger Bands and strategy.entry calls convert automatically. Anything that can't convert is listed, never silently dropped.</p>
+    <div class="pine">
+      <div class="code"><div class="cap">your_strategy.pine</div><pre><span class="c">//@version=5</span>
+<span class="f">strategy</span>(<span class="n">"MACD + BB"</span>)
+fast = <span class="f">input.int</span>(<span class="n">12</span>)
+[m, s, h] = <span class="f">ta.macd</span>(close, fast, <span class="n">26</span>, <span class="n">9</span>)
+[mid, up, lo] = <span class="f">ta.bb</span>(close, <span class="n">20</span>, <span class="n">2</span>)
+<span class="k">if</span> <span class="f">ta.crossover</span>(m, s) <span class="k">and</span> close &lt; mid
+    <span class="f">strategy.entry</span>(<span class="n">"L"</span>, strategy.long)
+<span class="k">if</span> close &gt; up
+    <span class="f">strategy.close</span>(<span class="n">"L"</span>)</pre></div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div class="code"><div class="cap">FlowDesk rules</div><pre><span class="c">Buy when</span>
+<span class="f">crossUp</span>(<span class="f">macd</span>(close, p1, <span class="n">26</span>, <span class="n">9</span>),
+        <span class="f">macdSignal</span>(close, p1, <span class="n">26</span>, <span class="n">9</span>))
+  <span class="k">and</span> close &lt; <span class="f">bbMiddle</span>(close, <span class="n">20</span>)
+
+<span class="c">Close long when</span>
+close &gt; <span class="f">bbUpper</span>(close, <span class="n">20</span>, <span class="n">2</span>)
+
+<span class="c">p1 = 12, ready for the optimizer</span></pre></div>
+    </div>
+  </div></section>
+
+  <section class="band view-pad"><div class="wrap">
+    <h2 style="font-family:var(--font-display);font-size:clamp(24px,3vw,34px)">Your next idea deserves a backtest.</h2>
+    <div class="cta-row"><a class="btn primary lg" href="#signup" data-guest>Get started free</a><a class="btn primary lg" href="#app" data-member hidden>Open the app</a></div>
+  </div></section>
+
+  <footer class="foot view-pad"><div class="wrap">
+    <span><b style="color:var(--text)">FlowDesk</b> · personal order-flow backtester</span>
+    <p>Backtest results are hypothetical, use historical data, and do not guarantee future performance. Nothing here is financial advice.</p>
+  </div></footer>
+</div>
+
+<!-- ============================== Log in ============================== -->
+<div id="view-login" class="view" hidden>
+  <div class="auth">
+    <div class="formside view-pad">
+      <div class="authtop"><a href="#welcome" class="brand" style="color:var(--text)"><b>Flow</b>Desk</a><a href="#welcome">← Back to home</a></div>
+      <div class="card">
+        <div><h1>Welcome back</h1><p class="muted">Log in to pick up where you left off.</p></div>
+        <p class="formerr" id="loginErr" hidden></p>
+        <form id="loginForm" novalidate>
+          <div class="fld"><label for="liEmail">Email</label><input id="liEmail" type="email" autocomplete="username" required><span class="msg" id="liEmailMsg"></span></div>
+          <div class="fld"><label for="liPass">Password <a href="#login" id="forgotLink" style="font-size:12px">Forgot password?</a></label>
+            <div class="pw"><input id="liPass" type="password" autocomplete="current-password" required><button type="button" data-toggle="liPass">Show</button></div><span class="msg" id="liPassMsg"></span></div>
+          <p class="note" id="forgotNote" hidden>Accounts are stored only in this browser, so there's no email reset. If you've forgotten your password, create a new account; your old presets stay under the old one.</p>
+          <label class="chk"><input type="checkbox" id="liRemember" checked> Keep me logged in on this device</label>
+          <button class="btn primary full" type="submit" id="liSubmit">Log in</button>
+        </form>
+        <div class="or">or</div>
+        <button class="btn full" type="button" data-guest-go>Try it without an account</button>
+        <p class="muted" style="text-align:center">New to FlowDesk? <a href="#signup">Create an account</a></p>
+      </div>
+    </div>
+    <div class="art"><canvas data-art></canvas>
+      <div class="quote"><h2>Your desk, as you left it</h2><ul><li>Saved presets and your last setup</li><li>Custom rules and imported Pine strategies</li><li>Risk settings, ready to run</li></ul></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================== Sign up ============================== -->
+<div id="view-signup" class="view" hidden>
+  <div class="auth">
+    <div class="formside view-pad">
+      <div class="authtop"><a href="#welcome" class="brand" style="color:var(--text)"><b>Flow</b>Desk</a><a href="#welcome">← Back to home</a></div>
+      <div class="card">
+        <div><h1>Create your account</h1><p class="muted">Free, private, and set up in under a minute.</p></div>
+        <p class="formerr" id="signupErr" hidden></p>
+        <form id="signupForm" novalidate>
+          <div class="fld"><label for="suName">Name</label><input id="suName" type="text" autocomplete="name" required><span class="msg" id="suNameMsg"></span></div>
+          <div class="fld"><label for="suEmail">Email</label><input id="suEmail" type="email" autocomplete="email" required><span class="msg" id="suEmailMsg"></span></div>
+          <div class="fld"><label for="suPass">Password</label>
+            <div class="pw"><input id="suPass" type="password" autocomplete="new-password" required><button type="button" data-toggle="suPass">Show</button></div>
+            <div class="meter" aria-hidden="true"><i id="pwMeter"></i></div><span class="meter-l" id="pwLabel">At least 8 characters, with a number or symbol.</span><span class="msg" id="suPassMsg"></span></div>
+          <div class="fld"><label for="suPass2">Confirm password</label><div class="pw"><input id="suPass2" type="password" autocomplete="new-password" required><button type="button" data-toggle="suPass2">Show</button></div><span class="msg" id="suPass2Msg"></span></div>
+          <label class="chk" style="align-items:flex-start"><input type="checkbox" id="suAgree" style="margin-top:3px"> <span>I understand backtests are hypothetical and FlowDesk is not financial advice.</span></label><span class="msg" id="suAgreeMsg" style="font-size:12px;color:var(--down)"></span>
+          <button class="btn primary full" type="submit" id="suSubmit">Create account</button>
+        </form>
+        <p class="muted" style="font-size:12px">Your account lives in this browser only. Your password is hashed on your device and never sent anywhere.</p>
+        <p class="muted" style="text-align:center">Already have an account? <a href="#login">Log in</a></p>
+      </div>
+    </div>
+    <div class="art"><canvas data-art></canvas>
+      <div class="quote"><h2>What you get</h2><ul><li>Flow-coloured bars and delta on any market</li><li>Seven setups plus your own formulas</li><li>Pine Script import with MACD and Bollinger Bands</li><li>Optimizer, replay and live alerts</li></ul></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================== Welcome aboard (onboarding) ============================== -->
+<div id="view-start" class="view" hidden>
+  <nav class="lnav view-pad"><div class="wrap"><a href="#welcome" class="brand" style="text-decoration:none;color:var(--text)"><b>Flow</b>Desk</a><span class="sp"></span><a class="l" href="#app">Skip to the app →</a></div></nav>
+  <section class="onb view-pad"><div class="wrap">
+    <div><span class="eyebrow">Account created</span><h1 style="margin-top:12px">Welcome aboard, <span id="onbName">trader</span>.</h1>
+      <p class="lede" style="margin-top:12px">Where would you like to start? You can switch any time from the left panel.</p></div>
+    <div class="ocards">
+      <button class="ocard" type="button" data-start="demo"><h3>Explore with sample data</h3><p>A ready-made market with a backtest already run. The quickest way to learn the screen.</p><span class="go">Start exploring →</span></button>
+      <button class="ocard" type="button" data-start="binance"><h3>Load live crypto</h3><p>Pull real BTC, ETH or any Binance pair with measured buy and sell volume.</p><span class="go">Choose a market →</span></button>
+      <button class="ocard" type="button" data-start="pine"><h3>Test my own strategy</h3><p>Write rules in simple formulas, or paste a TradingView Pine Script strategy.</p><span class="go">Open custom rules →</span></button>
+    </div>
+    <ul class="tips">
+      <li>Click any trade in the list to jump to it on the chart.</li>
+      <li>Press Enter in any setting to re-run the backtest.</li>
+      <li>Save presets to keep setups you like; they're tied to your account.</li>
+      <li>Check out-of-sample results in the Optimizer before trusting a setup.</li>
+    </ul>
+  </div></section>
+</div>
+
+<div id="view-app" class="view" hidden>
 <header class="top">
   <div class="brand"><b>Flow</b>Desk <small>order-flow backtester · personal</small></div>
   <div class="dataset" id="datasetLabel">loading…</div>
+  <div class="userbox" id="userBox"></div>
 </header>
 
 <div class="shell">
@@ -292,6 +595,7 @@ tr.click { cursor: pointer; }
       </div>
     </section>
   </main>
+</div>
 </div>
 <div id="toasts" aria-live="polite"></div>
 
@@ -1174,7 +1478,7 @@ function runAll() {
   renderKpis(st.result.metrics); renderTrades(st.result.trades); renderStats(st.result.metrics); renderSignals();
   drawPrice(st.replayEnd ?? st.bars.length); drawEquity();
   if (st.replayEnd == null && priceChart) priceChart.timeScale().setVisibleLogicalRange({ from: st.bars.length - 250, to: st.bars.length + 5 });
-  store.set("fd_last", { strat: $("stratSel").value, params: P, risk: R });
+  store.set(userKey("fd_last"), { strat: $("stratSel").value, params: P, risk: R });
 }
 $("runBtn").onclick = runAll;
 $("flowBars").onchange = () => st.result && drawPrice(st.replayEnd ?? st.bars.length);
@@ -1207,12 +1511,12 @@ $("loadBtn").onclick = async () => {
 };
 
 /* presets */
-function refreshPresets() { const ps = store.get("fd_presets", {}); $("presetSel").innerHTML = `<option value="">Presets…</option>` + Object.keys(ps).map(k => `<option>${k.replace(/</g, "&lt;")}</option>`).join(""); }
+function refreshPresets() { const ps = store.get(userKey("fd_presets"), {}); $("presetSel").innerHTML = `<option value="">Presets…</option>` + Object.keys(ps).map(k => `<option>${k.replace(/</g, "&lt;")}</option>`).join(""); }
 $("savePreset").onclick = () => {
-  const ps = store.get("fd_presets", {}), name = `${STRATS[$("stratSel").value].name} #${Object.keys(ps).length + 1}`;
-  ps[name] = { strat: $("stratSel").value, params: readParams(), risk: readRisk() }; store.set("fd_presets", ps); refreshPresets(); toast("Saved preset: " + name);
+  const ps = store.get(userKey("fd_presets"), {}), name = `${STRATS[$("stratSel").value].name} #${Object.keys(ps).length + 1}`;
+  ps[name] = { strat: $("stratSel").value, params: readParams(), risk: readRisk() }; store.set(userKey("fd_presets"), ps); refreshPresets(); toast("Saved preset: " + name);
 };
-$("presetSel").onchange = () => { const p = store.get("fd_presets", {})[$("presetSel").value]; if (p) applyConfig(p); $("presetSel").value = ""; };
+$("presetSel").onchange = () => { const p = store.get(userKey("fd_presets"), {})[$("presetSel").value]; if (p) applyConfig(p); $("presetSel").value = ""; };
 function applyConfig(p) {
   if (!STRATS[p.strat]) return; $("stratSel").value = p.strat; renderParams(p.params);
   const r = p.risk || {}; for (const k of ["capital", "riskPct", "stopAtr", "tpR", "atrLen", "maxBars", "commPct", "slipPct", "maxLev", "beR", "trailAtr", "trailStartR"]) if (r[k] != null) $(k).value = r[k];
@@ -1318,9 +1622,183 @@ $("liveBtn").onclick = () => {
 };
 
 /* ============================== Boot ============================== */
-initCharts(); refreshPresets();
-const last = store.get("fd_last", null);
-if (last && STRATS[last.strat]) { $("stratSel").value = last.strat; renderParams(last.params); const r = last.risk || {}; for (const k of Object.keys(r)) if ($(k) && k !== "dir") $(k).value = r[k]; if (r.dir) $("dirSel").value = r.dir; }
-else renderParams();
+function userKey(k) { return k + ":" + (window.FD_USER?.email || "guest"); }
+/* Restores the signed-in user's presets and last setup (called at boot and on log in / out). */
+function loadUserState() {
+  refreshPresets();
+  const last = store.get(userKey("fd_last"), null);
+  if (last && STRATS[last.strat]) { $("stratSel").value = last.strat; renderParams(last.params); const r = last.risk || {}; for (const k of Object.keys(r)) if ($(k) && k !== "dir") $(k).value = r[k]; if (r.dir) $("dirSel").value = r.dir; }
+  else { $("stratSel").selectedIndex = 0; renderParams(); }
+  if (st.bars.length) runAll();
+}
+initCharts(); renderParams();
 setBars(demoData(3000, 7), "Sample data (synthetic)");
+</script>
+<script>
+"use strict";
+/* ============================== Accounts (local to this browser) ==============================
+   Passwords are hashed with PBKDF2-SHA256 (150k rounds, random salt) via WebCrypto and stored in
+   localStorage. This keeps casual eyes out of a personal app; it is not server-grade security. */
+const SESS = {
+  get() { try { return JSON.parse(sessionStorage.getItem("fd_session") || localStorage.getItem("fd_session") || "null"); } catch { return null; } },
+  set(u, remember) { const v = JSON.stringify(u); try { (remember ? localStorage : sessionStorage).setItem("fd_session", v); } catch {} },
+  clear() { try { localStorage.removeItem("fd_session"); sessionStorage.removeItem("fd_session"); } catch {} },
+};
+const AUTH = {
+  users() { return store.get("fd_users", {}); },
+  b64: buf => btoa(String.fromCharCode(...new Uint8Array(buf))),
+  async hash(pw, salt) {
+    if (!crypto?.subtle) throw new Error("This browser can't hash passwords here. Open the page over https or as a local file in Chrome, Edge or Firefox.");
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: Uint8Array.from(atob(salt), c => c.charCodeAt(0)), iterations: 150000 }, key, 256);
+    return AUTH.b64(bits);
+  },
+  async signup(name, email, pw) {
+    const users = AUTH.users(), key = email.toLowerCase();
+    if (users[key]) throw new Error("An account with this email already exists in this browser. Log in instead.");
+    const salt = AUTH.b64(crypto.getRandomValues(new Uint8Array(16)));
+    users[key] = { name, email: key, salt, hash: await AUTH.hash(pw, salt), created: Date.now() };
+    store.set("fd_users", users);
+    if (!AUTH.users()[key]) throw new Error("Your browser is blocking storage, so the account couldn't be saved. Try a normal (non-private) window, or continue without an account.");
+    return { name, email: key };
+  },
+  async login(email, pw) {
+    const u = AUTH.users()[email.toLowerCase()];
+    if (!u || (await AUTH.hash(pw, u.salt)) !== u.hash) throw new Error("That email and password don't match an account in this browser.");
+    return { name: u.name, email: u.email };
+  },
+};
+
+/* ============================== Router ============================== */
+const VIEWS = ["welcome", "login", "signup", "start", "app"];
+function setUser(u) {
+  window.FD_USER = u;
+  const box = $("userBox");
+  if (box) box.innerHTML = u ? `<span class="avatar" aria-hidden="true">${escHtml((u.name || "?").trim()[0].toUpperCase())}</span><span class="nm">${escHtml(u.name)}${u.guest ? " (no account)" : ""}</span>
+      <a href="#welcome">Home</a><button class="link" type="button" id="logoutBtn">${u.guest ? "Exit" : "Log out"}</button>` : "";
+  const lo = $("logoutBtn"); if (lo) lo.onclick = () => { SESS.clear(); setUser(null); location.hash = "#welcome"; };
+  document.querySelectorAll("[data-guest]").forEach(e => e.hidden = !!u);
+  document.querySelectorAll("[data-member]").forEach(e => e.hidden = !u);
+  loadUserState();
+}
+function route() {
+  let v = (location.hash || "#welcome").slice(1);
+  if (["features", "how", "pine"].includes(v)) { show("welcome"); document.getElementById(v)?.scrollIntoView(); return; }
+  if (!VIEWS.includes(v)) v = "welcome";
+  if ((v === "app" || v === "start") && !window.FD_USER) v = "login";
+  if ((v === "login" || v === "signup") && window.FD_USER && !window.FD_USER.guest) v = "app";
+  show(v);
+}
+function show(v) {
+  VIEWS.forEach(x => { const el = $("view-" + x); if (el) el.hidden = x !== v; });
+  document.title = { welcome: "FlowDesk Backtester", login: "Log in · FlowDesk", signup: "Sign up · FlowDesk", start: "Welcome · FlowDesk", app: "FlowDesk Backtester" }[v];
+  window.scrollTo(0, 0);
+  ART.run(v);
+  if (v === "app" && st.bars.length) setTimeout(() => { if (priceChart) priceChart.timeScale().setVisibleLogicalRange({ from: st.bars.length - 250, to: st.bars.length + 5 }); }, 30);
+  if (v === "login") setTimeout(() => $("liEmail").focus(), 30);
+  if (v === "signup") setTimeout(() => $("suName").focus(), 30);
+}
+window.addEventListener("hashchange", route);
+document.querySelectorAll("[data-scroll]").forEach(a => a.onclick = e => { e.preventDefault(); document.getElementById(a.dataset.scroll)?.scrollIntoView({ behavior: "smooth" }); });
+
+/* ============================== Forms ============================== */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+function fieldErr(id, msg) { const i = $(id), m = $(id + "Msg"); if (i) i.setAttribute("aria-invalid", msg ? "true" : "false"); if (m) m.textContent = msg || ""; return !msg; }
+function formErr(id, msg) { $(id).textContent = msg || ""; $(id).hidden = !msg; }
+document.querySelectorAll("[data-toggle]").forEach(b => b.onclick = () => { const i = $(b.dataset.toggle), s = i.type === "password"; i.type = s ? "text" : "password"; b.textContent = s ? "Hide" : "Show"; });
+function pwScore(p) { let s = 0; if (p.length >= 8) s++; if (p.length >= 12) s++; if (/[a-z]/.test(p) && /[A-Z]/.test(p)) s++; if (/\d/.test(p)) s++; if (/[^\w\s]/.test(p)) s++; return Math.min(4, s); }
+$("suPass").oninput = () => {
+  const p = $("suPass").value, sc = p ? pwScore(p) : 0, lab = ["Too weak", "Weak", "Fair", "Good", "Strong"][sc];
+  $("pwMeter").style.width = (p ? (sc + 1) * 20 : 0) + "%"; $("pwMeter").style.background = sc < 2 ? "var(--down)" : sc < 3 ? "var(--brass)" : "var(--up)";
+  $("pwLabel").textContent = p ? `Strength: ${lab}` : "At least 8 characters, with a number or symbol.";
+};
+document.querySelectorAll(".auth input").forEach(i => i.addEventListener("input", () => { if (i.getAttribute("aria-invalid") === "true") fieldErr(i.id, ""); }));
+$("suAgree").addEventListener("change", () => { if ($("suAgree").checked) $("suAgreeMsg").textContent = ""; });
+$("forgotLink").onclick = e => { e.preventDefault(); $("forgotNote").hidden = !$("forgotNote").hidden; };
+
+$("signupForm").addEventListener("submit", async e => {
+  e.preventDefault(); formErr("signupErr", "");
+  const name = $("suName").value.trim(), email = $("suEmail").value.trim(), pw = $("suPass").value, pw2 = $("suPass2").value;
+  let ok = fieldErr("suName", name ? "" : "Enter your name.");
+  ok = fieldErr("suEmail", EMAIL_RE.test(email) ? "" : "Enter a valid email address, like you@example.com.") && ok;
+  ok = fieldErr("suPass", pw.length < 8 ? "Use at least 8 characters." : !/[\d\W_]/.test(pw) ? "Add a number or symbol." : "") && ok;
+  ok = fieldErr("suPass2", pw2 && pw2 === pw ? "" : "The passwords don't match.") && ok;
+  $("suAgreeMsg").textContent = $("suAgree").checked ? "" : "Please tick this box to continue."; ok = $("suAgree").checked && ok;
+  if (!ok) return;
+  $("suSubmit").disabled = true; $("suSubmit").textContent = "Creating account…";
+  try { const u = await AUTH.signup(name, email, pw); SESS.set(u, true); setUser(u); $("onbName").textContent = name.split(" ")[0]; $("signupForm").reset(); $("suPass").oninput(); location.hash = "#start"; }
+  catch (err) { formErr("signupErr", err.message); }
+  finally { $("suSubmit").disabled = false; $("suSubmit").textContent = "Create account"; }
+});
+$("loginForm").addEventListener("submit", async e => {
+  e.preventDefault(); formErr("loginErr", "");
+  const email = $("liEmail").value.trim(), pw = $("liPass").value;
+  let ok = fieldErr("liEmail", EMAIL_RE.test(email) ? "" : "Enter the email you signed up with.");
+  ok = fieldErr("liPass", pw ? "" : "Enter your password.") && ok; if (!ok) return;
+  $("liSubmit").disabled = true; $("liSubmit").textContent = "Logging in…";
+  try { const u = await AUTH.login(email, pw); SESS.set(u, $("liRemember").checked); setUser(u); $("loginForm").reset(); $("liRemember").checked = true; location.hash = "#app"; toast(`Welcome back, ${u.name.split(" ")[0]}.`); }
+  catch (err) { formErr("loginErr", err.message); }
+  finally { $("liSubmit").disabled = false; $("liSubmit").textContent = "Log in"; }
+});
+document.querySelectorAll("[data-guest-go]").forEach(b => b.onclick = () => { setUser({ name: "Guest", email: "guest", guest: true }); location.hash = "#app"; });
+
+/* onboarding shortcuts */
+document.querySelectorAll("[data-start]").forEach(b => b.onclick = () => {
+  const k = b.dataset.start; location.hash = "#app";
+  setTimeout(() => {
+    if (k === "binance") { document.querySelector('[data-src="binance"]').click(); $("bnSymbol").focus(); toast("Pick a symbol and interval, then press Load data."); }
+    if (k === "pine") { $("stratSel").value = "custom"; renderParams(); runAll(); setTimeout(() => { $("pineBox").open = true; $("stratSel").scrollIntoView({ behavior: "smooth", block: "start" }); }, 50); }
+  }, 60);
+});
+
+/* ============================== Animated market canvas (hero + auth art) ============================== */
+const ART = (() => {
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const bars = demoData(900, 21), f = flowFeatures(bars), ema = IND.ema(bars.map(b => b.c), 20);
+  let raf = 0, t0 = 0, targets = [];
+  function draw(cv, pos, opts) {
+    const dpr = Math.min(2, devicePixelRatio || 1), w = cv.clientWidth, h = cv.clientHeight; if (!w || !h) return;
+    if (cv.width !== Math.round(w * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+    const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    const bw = opts.bw, n = Math.ceil(w / bw) + 2, start = Math.floor(pos), frac = pos - start;
+    const vis = []; for (let k = 0; k < n; k++) vis.push((start + k) % bars.length);
+    const pH = h * (opts.full ? 0.8 : 0.72), dTop = pH + 8, dH = h - dTop - (opts.full ? 8 : 44);
+    let lo = Infinity, hi = -Infinity, dm = 1; vis.forEach(i => { lo = Math.min(lo, bars[i].l); hi = Math.max(hi, bars[i].h); dm = Math.max(dm, Math.abs(f.delta[i])); });
+    const pad = (hi - lo) * 0.08, y = v => 14 + (1 - (v - lo + pad) / (hi - lo + 2 * pad)) * (pH - 20);
+    g.strokeStyle = "rgba(36,50,63,.7)"; g.lineWidth = 1; for (let k = 1; k < 5; k++) { const yy = Math.round(pH * k / 5) + .5; g.beginPath(); g.moveTo(0, yy); g.lineTo(w, yy); g.stroke(); }
+    g.beginPath(); vis.forEach((i, k) => { const x = (k - frac) * bw + bw / 2; if (isFinite(ema[i])) k ? g.lineTo(x, y(ema[i])) : g.moveTo(x, y(ema[i])); }); g.strokeStyle = "rgba(224,169,67,.85)"; g.lineWidth = 1.5; g.stroke();
+    vis.forEach((i, k) => {
+      const b = bars[i], x = (k - frac) * bw, col = flowColor(flowState(bars, f, i));
+      g.fillStyle = col; g.fillRect(Math.round(x + bw / 2) - .5, y(b.h), 1, Math.max(1, y(b.l) - y(b.h)));
+      const top = y(Math.max(b.o, b.c)), bot = y(Math.min(b.o, b.c)); g.fillRect(Math.round(x + 1), top, Math.max(1, bw - 2), Math.max(1.5, bot - top));
+      const dh = f.delta[i] / dm * dH / 2, mid = dTop + dH / 2; g.fillStyle = f.delta[i] >= 0 ? "rgba(63,182,160,.7)" : "rgba(224,102,90,.7)";
+      g.fillRect(Math.round(x + 1), dh >= 0 ? mid - dh : mid, Math.max(1, bw - 2), Math.abs(dh));
+      if (opts.marks && b.v > 1.6 * (f.volAvg[i] || Infinity) && Math.abs(f.dpct[i]) > 0.3 && i % 3 === 0) {
+        const up = f.dpct[i] > 0; g.fillStyle = up ? "#3fd6b8" : "#ff7a6b"; g.font = "600 10px IBM Plex Mono, monospace"; g.textAlign = "center";
+        g.fillText(up ? "▲ BUY" : "▼ SELL", x + bw / 2, up ? y(b.l) + 14 : y(b.h) - 6);
+      }
+    });
+    return vis[vis.length - 3];
+  }
+  function frame(ts) {
+    if (!t0) t0 = ts; const pos = reduce ? 300 : 300 + (ts - t0) / 260;
+    targets.forEach(({ cv, opts }) => { const last = draw(cv, pos, opts); if (opts.hero && last != null) { const d = f.dpct[last] * 100, el = $("chipDelta"); el.textContent = (d >= 0 ? "+" : "") + d.toFixed(0) + "%"; el.className = d >= 0 ? "pos" : "neg"; } });
+    if (!reduce) raf = requestAnimationFrame(frame);
+  }
+  return {
+    run(view) {
+      cancelAnimationFrame(raf); t0 = 0;
+      targets = view === "welcome" ? [{ cv: $("heroCanvas"), opts: { bw: 9, marks: true, hero: true } }]
+        : (view === "login" || view === "signup") ? [{ cv: document.querySelector(`#view-${view} [data-art]`), opts: { bw: 12, full: true } }] : [];
+      if (targets.length) raf = requestAnimationFrame(frame);
+    },
+  };
+})();
+document.addEventListener("visibilitychange", () => { if (!document.hidden) ART.run(VIEWS.find(v => !$("view-" + v).hidden)); });
+const tapeItems = ["Order-flow momentum", "Absorption reversal", "Cumulative delta divergence", "EMA crossover", "RSI mean reversion", "Donchian breakout", "VWAP reversion", "Custom rules", "Pine Script import", "Trailing stops", "Out-of-sample optimizer", "Live alerts"];
+$("tape").innerHTML = [...tapeItems, ...tapeItems].map((t, i) => `<span><b>${String(i % tapeItems.length + 1).padStart(2, "0")}</b>${t}</span>`).join("");
+
+/* ============================== Start ============================== */
+setUser(SESS.get());
+route();
 </script>
