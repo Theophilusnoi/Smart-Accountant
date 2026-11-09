@@ -1,0 +1,355 @@
+//@version=6
+// =====================================================================================================
+//  NQ 9:15–9:30 NY OPENING RANGE BREAKOUT — with 5 selectable regime filters (A/B testing harness)
+// =====================================================================================================
+//
+//  INSTRUMENT / CHART
+//  - Built and defaulted for NQ1! (Nasdaq-100 E-mini futures, continuous) on the 15-minute chart.
+//  - Symbol-agnostic: all logic is in PRICE POINTS, never dollars. MNQ1! (Micro) behaves identically;
+//    only the dollar value per point differs (NQ = $20/point/contract, MNQ = $2/point/contract).
+//    TradingView applies syminfo.pointvalue automatically, so no dollar value is hardcoded anywhere.
+//  - Assumes 15-minute bars. Any timeframe <= 15 min also works (the range aggregates every bar that
+//    opens inside the window, e.g. three 5-min bars). Timeframes > 15 min have no bar that opens inside
+//    9:15–9:30, so no range is formed and the strategy will not trade (a warning shows in the info table).
+//
+//  TIMEZONE
+//  - Every session / calendar call passes "America/New_York" explicitly. The chart/exchange timezone
+//    (CME = America/Chicago) is never relied on.
+//
+//  OPENING RANGE
+//  - Window = bars whose OPEN time is in [09:15, 09:30) NY. On 15m that is the single 9:15 bar
+//    (spanning 9:15–9:30). Range high/low = highest high / lowest low of all bars in that window.
+//  - The range locks when the last window bar closes (at 9:30). The first bar eligible to signal is the
+//    first bar AFTER the window (the 9:30–9:45 bar on 15m). No signal can ever fire on a window bar.
+//  - Range, "range set" flag and trade counter reset on the NY CALENDAR day change (midnight NY), not the
+//    CME session change (18:00 NY). If a NY day has no window bars (holiday / closed), no trades occur.
+//
+//  ENTRIES (evaluated on bar close only — calc_on_every_tick = false)
+//  - Long : close > rangeHigh AND close > open (bullish body closes above range)
+//  - Short: close < rangeLow  AND close < open (bearish body closes below range)
+//  - Must also pass the selected regime filter and the direction filter, be flat, and be under the
+//    max-trades-per-day limit (default 1 = one trade per day regardless of outcome).
+//  - FILL BEHAVIOR: Pine default (process_orders_on_close = false). The signal is computed at the close of
+//    the breakout candle and the market order fills at the OPEN of the next bar. SL/TP levels are computed
+//    from the breakout candle's CLOSE (the spec's "entry"), so realised R can differ slightly from planned R
+//    when the next bar gaps. To fill exactly at the breakout close instead, change
+//    process_orders_on_close to true in the strategy() call below.
+//
+//  STOP / TARGET (fixed at entry — no trailing, no breakeven)
+//  - Long : SL = breakout candle low,  R = entry - SL, TP = entry + 0.5 * R
+//  - Short: SL = breakout candle high, R = SL - entry, TP = entry - 0.5 * R
+//  - Implemented with strategy.exit(stop=, limit=) tied to the matching entry ID.
+//  - Note: if one bar touches both SL and TP, TradingView's broker emulator infers the intrabar path from
+//    OHLC. Enable "Bar Magnifier" in Properties (if your plan supports it) for more accurate fills.
+//
+//  REGIME FILTERS ("Regime Filter" dropdown) — all evaluated on the breakout bar itself
+//    None               : baseline, no gating
+//    ADX Trend Strength : ADX >= threshold allows both sides                      (non-directional)
+//    EMA Slope          : slope = (EMA - EMA[lb]) / lb; long slope > +min, short slope < -min (directional)
+//    ATR Volatility     : ATR / SMA(ATR) >= min ratio allows both sides           (non-directional)
+//    RSI Momentum       : long RSI >= longMin; short RSI <= shortMax              (directional)
+//    Price vs VWAP      : long close > VWAP; short close < VWAP                   (directional)
+//                         ta.vwap is anchored to the exchange session start (18:00 NY for CME futures).
+//
+//  POSITION SIZING — IMPORTANT
+//  - strategy() is declared with initial_capital 10000 and 10% of equity per spec. However, one NQ
+//    contract controls roughly price x $20 of notional (hundreds of thousands of dollars), so 10% of a
+//    $10k account computes to a fraction of a contract, which TradingView rounds down to 0 -> NO TRADES.
+//    The "Position Sizing" input therefore defaults to "Fixed Contracts" (1). Switch it to
+//    "% of Equity (strategy default)" only if you also raise initial capital substantially.
+//  - margin_long / margin_short are set to 0 (margin checks disabled) so the emulator doesn't force
+//    margin-call liquidations on a small simulated account. Futures margin isn't modelled.
+//  - Commission is $0.62 per contract per side (strategy.commission.cash_per_contract). Pine requires
+//    strategy() arguments to be compile-time constants, so it cannot be driven by an input.* — adjust it
+//    in the Strategy Tester: Settings (gear) > Properties > Commission.
+//
+//  HOW TO A/B TEST THE FILTERS
+//  1. Add to NQ1!, 15-minute chart. Use as much history as your plan allows (Deep Backtesting if available).
+//  2. Run the Strategy Tester once per "Regime Filter" option — start with "None" (baseline), then each of
+//     the five filters, keeping every other input unchanged.
+//  3. For each run record: Net P&L, Profit Factor, Win Rate (% profitable), Max Drawdown, Total Trades.
+//  4. With a 0.5R target, break-even win rate before costs is 1 / (1 + 0.5) = ~66.7% (higher after
+//     commission/slippage). Judge filters primarily on whether they cut false breakouts / chop — i.e.
+//     raise Profit Factor and Win Rate and lower drawdown versus the baseline — NOT on raw trade count.
+//     Beware filters that look good only because they leave a tiny sample of trades.
+//  5. After choosing a filter, tune its parameters and validate on out-of-sample dates to avoid overfit.
+// =====================================================================================================
+
+strategy("NQ 9:15 ORB + Regime Filters",
+     shorttitle             = "NQ ORB Regime",
+     overlay                = true,
+     initial_capital        = 10000,
+     default_qty_type       = strategy.percent_of_equity,
+     default_qty_value      = 10,
+     commission_type        = strategy.commission.cash_per_contract,
+     commission_value       = 0.62,
+     calc_on_every_tick     = false,
+     process_orders_on_close = false,
+     pyramiding             = 0,
+     margin_long            = 0,
+     margin_short           = 0)
+
+// =====================================================================================================
+// CONSTANTS
+// =====================================================================================================
+const string NY = "America/New_York"   // single source of truth for all session/calendar calls
+
+const string F_NONE = "None"
+const string F_ADX  = "ADX Trend Strength"
+const string F_EMA  = "EMA Slope"
+const string F_ATR  = "ATR Volatility"
+const string F_RSI  = "RSI Momentum"
+const string F_VWAP = "Price vs VWAP"
+
+const string D_BOTH  = "Both"
+const string D_LONG  = "Long Only"
+const string D_SHORT = "Short Only"
+
+const string SZ_FIXED = "Fixed Contracts"
+const string SZ_PCT   = "% of Equity (strategy default)"
+
+// =====================================================================================================
+// INPUTS
+// =====================================================================================================
+const string G_RANGE = "Opening Range"
+string rangeSess = input.session("0915-0930", "Range Window (NY time)", group = G_RANGE,
+     tooltip = "Bars whose open time falls in this window (New York time, Mon–Fri) build the range. Default 09:15–09:30. On 15m this is the single 9:15 bar.")
+float  tpMultR   = input.float(0.5, "Take Profit (x R)", minval = 0.1, maxval = 10.0, step = 0.1, group = G_RANGE,
+     tooltip = "Target distance as a multiple of risk R. Spec default 0.5.")
+
+const string G_FILTER = "Regime Filter"
+string regimeFilter = input.string(F_NONE, "Regime Filter", options = [F_NONE, F_ADX, F_EMA, F_ATR, F_RSI, F_VWAP], group = G_FILTER,
+     tooltip = "Select one filter per backtest run. 'None' = baseline with no gating.")
+bool   showFilterSeries = input.bool(true, "Plot active filter series (EMA / VWAP on chart)", group = G_FILTER)
+
+const string G_ADX = "1) ADX Trend Strength"
+int    adxLen       = input.int(14, "ADX Length (DI + smoothing)", minval = 1, maxval = 200, group = G_ADX)
+float  adxThreshold = input.float(25.0, "ADX Threshold (>=)", minval = 0.0, maxval = 100.0, step = 0.5, group = G_ADX)
+
+const string G_EMA = "2) EMA Slope"
+int    emaLen      = input.int(50, "EMA Length", minval = 1, maxval = 500, group = G_EMA)
+int    emaSlopeLb  = input.int(5, "Slope Lookback (bars)", minval = 1, maxval = 100, group = G_EMA)
+float  emaMinSlope = input.float(0.0, "Min |Slope| (points per bar)", minval = 0.0, step = 0.05, group = G_EMA,
+     tooltip = "Long requires slope > +value; short requires slope < -value.")
+
+const string G_ATR = "3) ATR Volatility Expansion"
+int    atrLen      = input.int(14, "ATR Length", minval = 1, maxval = 200, group = G_ATR)
+int    atrSmaLen   = input.int(50, "ATR SMA Length", minval = 1, maxval = 500, group = G_ATR)
+float  atrMinRatio = input.float(1.2, "Min ATR / SMA(ATR) Ratio", minval = 0.0, maxval = 10.0, step = 0.05, group = G_ATR)
+
+const string G_RSI = "4) RSI Momentum"
+int    rsiLen      = input.int(14, "RSI Length", minval = 1, maxval = 200, group = G_RSI)
+float  rsiLongMin  = input.float(50.0, "Long: RSI >=", minval = 0.0, maxval = 100.0, step = 0.5, group = G_RSI)
+float  rsiShortMax = input.float(50.0, "Short: RSI <=", minval = 0.0, maxval = 100.0, step = 0.5, group = G_RSI)
+
+// 5) Price vs VWAP has no parameters (session-anchored ta.vwap on hlc3).
+
+const string G_EXEC = "Execution / Sizing"
+string sizingMode = input.string(SZ_FIXED, "Position Sizing", options = [SZ_FIXED, SZ_PCT], group = G_EXEC,
+     tooltip = "10% of a $10k account is far less than one NQ contract and rounds to 0 (no trades). Fixed Contracts is the practical default.")
+int    fixedQty   = input.int(1, "Fixed Contracts", minval = 1, maxval = 1000, group = G_EXEC)
+
+const string G_OPT = "Optional Enhancements"
+bool   useEod      = input.bool(false, "End-of-Day Flatten", group = G_OPT, inline = "eod",
+     tooltip = "Close any open position on the first bar that CLOSES at/after this NY time (fills at the next bar's open). Also blocks new entries after this time. On 15m, 15:45 exits at ~15:45.")
+int    eodHour     = input.int(15, "Hr", minval = 0, maxval = 23, group = G_OPT, inline = "eod")
+int    eodMinute   = input.int(45, "Min", minval = 0, maxval = 59, group = G_OPT, inline = "eod")
+bool   useCutoff   = input.bool(false, "Last Entry Time", group = G_OPT, inline = "cut",
+     tooltip = "No new entries on bars that close after this NY time. Off = entries allowed any time after the range locks until the NY day ends.")
+int    cutHour     = input.int(12, "Hr", minval = 0, maxval = 23, group = G_OPT, inline = "cut")
+int    cutMinute   = input.int(0, "Min", minval = 0, maxval = 59, group = G_OPT, inline = "cut")
+int    maxTradesPerDay = input.int(1, "Max Trades Per Day", minval = 1, maxval = 10, group = G_OPT,
+     tooltip = "Spec default 1: after the first entry (win or lose) no more entries that NY day.")
+string dirFilter   = input.string(D_BOTH, "Signal Direction", options = [D_BOTH, D_LONG, D_SHORT], group = G_OPT)
+bool   showTable   = input.bool(true, "Show Info Table", group = G_OPT)
+
+// =====================================================================================================
+// NY TIME HELPERS
+// =====================================================================================================
+// NY calendar-day key (YYYYMMDD). Changes at midnight New York, independent of the CME session break.
+int  nyDayKey = year(time, NY) * 10000 + month(time, NY) * 100 + dayofmonth(time, NY)
+bool newNyDay = bar_index == 0 or nyDayKey != nz(nyDayKey[1])
+
+// Bar CLOSE time in NY minutes-of-day (used for EOD flatten and entry cutoff).
+int  closeMinNy = hour(time_close, NY) * 60 + minute(time_close, NY)
+
+// Is this bar inside the opening-range window? NY timezone passed explicitly; Mon–Fri only.
+bool inRangeWindow = not na(time(timeframe.period, rangeSess + ":23456", NY))
+
+// =====================================================================================================
+// RANGE CAPTURE
+// =====================================================================================================
+var float rangeHigh       = na
+var float rangeLow        = na
+var bool  rangeHasData    = false   // at least one window bar seen today
+var bool  rangeSet        = false   // range locked (window finished) for today
+var int   tradesToday     = 0
+var bool  tradeTakenToday = false
+
+// Daily reset on NY calendar day change (must run BEFORE capture so a new day starts clean).
+if newNyDay
+    rangeHigh       := na
+    rangeLow        := na
+    rangeHasData    := false
+    rangeSet        := false
+    tradesToday     := 0
+    tradeTakenToday := false
+
+// Aggregate every bar that opens inside the window (works for 1/3/5/15-min charts alike).
+if inRangeWindow and not rangeSet
+    rangeHigh    := na(rangeHigh) ? high : math.max(rangeHigh, high)
+    rangeLow     := na(rangeLow)  ? low  : math.min(rangeLow, low)
+    rangeHasData := true
+
+// Lock the range on the first bar AFTER the window. A day with no window bars never locks -> no trades.
+if not rangeSet and not inRangeWindow and inRangeWindow[1] and rangeHasData
+    rangeSet := true
+
+// =====================================================================================================
+// REGIME FILTER SERIES (computed every bar at global scope for consistent history)
+// =====================================================================================================
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+float emaVal   = ta.ema(close, emaLen)
+float emaSlope = (emaVal - emaVal[emaSlopeLb]) / emaSlopeLb
+
+float atrVal   = ta.atr(atrLen)
+float atrSma   = ta.sma(atrVal, atrSmaLen)
+float atrRatio = atrSma > 0 ? atrVal / atrSma : na
+
+float rsiVal   = ta.rsi(close, rsiLen)
+
+float vwapVal  = ta.vwap(hlc3)   // session-anchored VWAP
+
+// =====================================================================================================
+// REGIME GATES (evaluated on the same bar as the breakout; na values never pass)
+// =====================================================================================================
+bool regimeLongOk  = true
+bool regimeShortOk = true
+
+if regimeFilter == F_ADX
+    bool ok = not na(adxVal) and adxVal >= adxThreshold
+    regimeLongOk  := ok
+    regimeShortOk := ok
+else if regimeFilter == F_EMA
+    regimeLongOk  := not na(emaSlope) and emaSlope >  emaMinSlope
+    regimeShortOk := not na(emaSlope) and emaSlope < -emaMinSlope
+else if regimeFilter == F_ATR
+    bool ok = not na(atrRatio) and atrRatio >= atrMinRatio
+    regimeLongOk  := ok
+    regimeShortOk := ok
+else if regimeFilter == F_RSI
+    regimeLongOk  := not na(rsiVal) and rsiVal >= rsiLongMin
+    regimeShortOk := not na(rsiVal) and rsiVal <= rsiShortMax
+else if regimeFilter == F_VWAP
+    regimeLongOk  := not na(vwapVal) and close > vwapVal
+    regimeShortOk := not na(vwapVal) and close < vwapVal
+
+// =====================================================================================================
+// SIGNAL GENERATION
+// =====================================================================================================
+bool allowLongDir  = dirFilter != D_SHORT
+bool allowShortDir = dirFilter != D_LONG
+
+bool eodReached   = useEod    and closeMinNy >= eodHour * 60 + eodMinute
+bool pastCutoff   = useCutoff and closeMinNy >  cutHour * 60 + cutMinute
+
+// Entry eligibility: range locked, not a range-defining bar, na guard, daily limit, flat, time limits.
+bool canEnter = rangeSet
+     and not inRangeWindow
+     and not na(rangeHigh) and not na(rangeLow)
+     and tradesToday < maxTradesPerDay
+     and strategy.position_size == 0
+     and not eodReached
+     and not pastCutoff
+
+bool longBreak  = close > rangeHigh and close > open   // bullish body close above range
+bool shortBreak = close < rangeLow  and close < open   // bearish body close below range
+
+bool longSignal  = canEnter and longBreak  and regimeLongOk  and allowLongDir
+bool shortSignal = canEnter and shortBreak and regimeShortOk and allowShortDir
+
+// =====================================================================================================
+// EXECUTION
+// =====================================================================================================
+float orderQty = sizingMode == SZ_FIXED ? float(fixedQty) : na   // na -> use strategy() default sizing
+
+var float slLevel = na
+var float tpLevel = na
+
+if longSignal
+    float entryRef = close
+    float stopPx   = low
+    float riskR    = entryRef - stopPx           // > 0 guaranteed: bullish bar => low <= open < close
+    slLevel := stopPx
+    tpLevel := entryRef + tpMultR * riskR
+    strategy.entry("ORB Long", strategy.long, qty = orderQty)
+    strategy.exit("ORB Long Exit", from_entry = "ORB Long", stop = slLevel, limit = tpLevel,
+         comment_loss = "SL", comment_profit = "TP")
+    tradesToday     += 1
+    tradeTakenToday := true
+
+if shortSignal
+    float entryRef = close
+    float stopPx   = high
+    float riskR    = stopPx - entryRef           // > 0 guaranteed: bearish bar => high >= open > close
+    slLevel := stopPx
+    tpLevel := entryRef - tpMultR * riskR
+    strategy.entry("ORB Short", strategy.short, qty = orderQty)
+    strategy.exit("ORB Short Exit", from_entry = "ORB Short", stop = slLevel, limit = tpLevel,
+         comment_loss = "SL", comment_profit = "TP")
+    tradesToday     += 1
+    tradeTakenToday := true
+
+// Optional end-of-day flatten (market close at next bar open).
+if eodReached and strategy.position_size != 0
+    strategy.close_all(comment = "EOD Flatten")
+
+// =====================================================================================================
+// VISUALIZATION
+// =====================================================================================================
+// Opening range lines: drawn from the lock bar to the end of the NY day, broken between days.
+plot(rangeSet ? rangeHigh : na, "Range High", color.new(color.green, 0), 2, plot.style_linebr)
+plot(rangeSet ? rangeLow  : na, "Range Low",  color.new(color.red, 0),   2, plot.style_linebr)
+
+// Shade the range window.
+bgcolor(inRangeWindow ? color.new(color.blue, 85) : na, title = "Range Window")
+
+// Active SL/TP while in a position.
+bool inPos = strategy.position_size != 0
+plot(inPos ? slLevel : na, "Stop Loss",   color.new(color.orange, 0), 1, plot.style_linebr)
+plot(inPos ? tpLevel : na, "Take Profit", color.new(color.aqua, 0),   1, plot.style_linebr)
+
+// Active filter series on price (EMA / VWAP); oscillator values go to the Data Window only.
+plot(showFilterSeries and regimeFilter == F_EMA  ? emaVal  : na, "EMA (filter)",  color.new(color.yellow, 0), 2)
+plot(showFilterSeries and regimeFilter == F_VWAP ? vwapVal : na, "VWAP (filter)", color.new(color.fuchsia, 0), 2, plot.style_linebr)
+plot(regimeFilter == F_ADX ? adxVal   : na, "ADX (filter)",       display = display.data_window)
+plot(regimeFilter == F_EMA ? emaSlope : na, "EMA Slope (filter)", display = display.data_window)
+plot(regimeFilter == F_ATR ? atrRatio : na, "ATR Ratio (filter)", display = display.data_window)
+plot(regimeFilter == F_RSI ? rsiVal   : na, "RSI (filter)",       display = display.data_window)
+
+// Info table (last bar only).
+var table info = table.new(position.top_right, 2, 7, bgcolor = color.new(color.black, 80),
+     border_color = color.new(color.gray, 60), border_width = 1, frame_color = color.new(color.gray, 40), frame_width = 1)
+
+if showTable and barstate.islast
+    string filterVal = regimeFilter == F_ADX  ? "ADX " + str.tostring(adxVal, "#.##") :
+                       regimeFilter == F_EMA  ? "Slope " + str.tostring(emaSlope, "#.###") :
+                       regimeFilter == F_ATR  ? "Ratio " + str.tostring(atrRatio, "#.###") :
+                       regimeFilter == F_RSI  ? "RSI " + str.tostring(rsiVal, "#.##") :
+                       regimeFilter == F_VWAP ? "VWAP " + str.tostring(vwapVal, format.mintick) : "—"
+    bool tfOk = timeframe.in_seconds() <= 900
+    table.cell(info, 0, 0, "Filter",      text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 0, regimeFilter,  text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 1, "Filter value", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 1, filterVal,     text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 2, "Range High",  text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 2, na(rangeHigh) ? "—" : str.tostring(rangeHigh, format.mintick), text_color = color.green, text_size = size.small)
+    table.cell(info, 0, 3, "Range Low",   text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 3, na(rangeLow) ? "—" : str.tostring(rangeLow, format.mintick), text_color = color.red, text_size = size.small)
+    table.cell(info, 0, 4, "Range locked", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 4, rangeSet ? "Yes" : "No", text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 5, "Trades today", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 5, str.tostring(tradesToday) + " / " + str.tostring(maxTradesPerDay), text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 6, "Timeframe",   text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 6, tfOk ? timeframe.period + " OK" : timeframe.period + " — use <= 15m", text_color = tfOk ? color.white : color.orange, text_size = size.small)
