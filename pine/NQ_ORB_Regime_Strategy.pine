@@ -29,6 +29,12 @@
 //  - Short: close < rangeLow  AND close < open (bearish body closes below range)
 //  - Must also pass the selected regime filter and the direction filter, be flat, and be under the
 //    max-trades-per-day limit (default 1 = one trade per day regardless of outcome).
+//  - "First Breakout Only" (default ON): only the day's FIRST body-close breakout is a candidate. If the
+//    filters reject it, there is no trade that day — a filter can remove trades but never delay them to a
+//    later, different breakout. This keeps every filter run directly comparable to the "None" baseline.
+//  - "Last Entry Time" (default ON, 11:00 NY) and "End-of-Day Flatten" (default ON, 15:45 NY) keep the
+//    strategy intraday: no afternoon/evening entries and no positions held into the CME evening session.
+//  - Optional "Max Risk (R) Filter" (default OFF) skips days whose stop distance exceeds N points.
 //  - FILL BEHAVIOR: Pine default (process_orders_on_close = false). The signal is computed at the close of
 //    the breakout candle and the market order fills at the OPEN of the next bar. SL/TP levels are computed
 //    from the breakout candle's CLOSE (the spec's "entry"), so realised R can differ slightly from planned R
@@ -57,6 +63,9 @@
 //    $10k account computes to a fraction of a contract, which TradingView rounds down to 0 -> NO TRADES.
 //    The "Position Sizing" input therefore defaults to "Fixed Contracts" (1). Switch it to
 //    "% of Equity (strategy default)" only if you also raise initial capital substantially.
+//  - "Fixed $ Risk per Trade" sizes each trade so a stop-out loses ~the chosen dollar amount:
+//    contracts = floor(risk$ / (R points x syminfo.pointvalue)), capped at "Max Contracts". If that is
+//    < 1 contract the trade is skipped. MNQ ($2/pt) gives much finer sizing than NQ ($20/pt).
 //  - margin_long / margin_short are set to 0 (margin checks disabled) so the emulator doesn't force
 //    margin-call liquidations on a small simulated account. Futures margin isn't modelled.
 //  - Commission is $0.62 per contract per side (strategy.commission.cash_per_contract). Pine requires
@@ -107,6 +116,7 @@ const string D_SHORT = "Short Only"
 
 const string SZ_FIXED = "Fixed Contracts"
 const string SZ_PCT   = "% of Equity (strategy default)"
+const string SZ_RISK  = "Fixed $ Risk per Trade"
 
 // =====================================================================================================
 // INPUTS
@@ -145,21 +155,29 @@ float  rsiShortMax = input.float(50.0, "Short: RSI <=", minval = 0.0, maxval = 1
 // 5) Price vs VWAP has no parameters (session-anchored ta.vwap on hlc3).
 
 const string G_EXEC = "Execution / Sizing"
-string sizingMode = input.string(SZ_FIXED, "Position Sizing", options = [SZ_FIXED, SZ_PCT], group = G_EXEC,
-     tooltip = "10% of a $10k account is far less than one NQ contract and rounds to 0 (no trades). Fixed Contracts is the practical default.")
+string sizingMode = input.string(SZ_FIXED, "Position Sizing", options = [SZ_FIXED, SZ_RISK, SZ_PCT], group = G_EXEC,
+     tooltip = "Fixed Contracts: always trade N contracts. Fixed $ Risk: contracts = floor($risk / (R points x point value)); the trade is SKIPPED if that is < 1 contract. % of Equity: strategy() default (10% of a $10k account rounds to 0 NQ contracts = no trades).")
 int    fixedQty   = input.int(1, "Fixed Contracts", minval = 1, maxval = 1000, group = G_EXEC)
+float  riskDollars = input.float(1000.0, "Risk per Trade ($) — Fixed $ Risk mode", minval = 1.0, step = 50.0, group = G_EXEC,
+     tooltip = "Dollar loss if the stop is hit (before commission/slippage). NQ = $20/pt, MNQ = $2/pt per contract, taken from syminfo.pointvalue.")
+int    maxRiskQty  = input.int(10, "Max Contracts — Fixed $ Risk mode", minval = 1, maxval = 1000, group = G_EXEC)
 
 const string G_OPT = "Optional Enhancements"
-bool   useEod      = input.bool(false, "End-of-Day Flatten", group = G_OPT, inline = "eod",
+bool   firstBreakOnly = input.bool(true, "First Breakout Only", group = G_OPT,
+     tooltip = "ON (recommended for A/B testing): only the day's FIRST body-close breakout of the range is eligible. If it fails the regime/direction/Max-R/sizing checks, there is NO trade that day — filters can only remove trades, never shift them to a later bar. OFF: any later breakout that passes can still trigger (original behaviour).")
+bool   useEod      = input.bool(true, "End-of-Day Flatten", group = G_OPT, inline = "eod",
      tooltip = "Close any open position on the first bar that CLOSES at/after this NY time (fills at the next bar's open). Also blocks new entries after this time. On 15m, 15:45 exits at ~15:45.")
 int    eodHour     = input.int(15, "Hr", minval = 0, maxval = 23, group = G_OPT, inline = "eod")
 int    eodMinute   = input.int(45, "Min", minval = 0, maxval = 59, group = G_OPT, inline = "eod")
-bool   useCutoff   = input.bool(false, "Last Entry Time", group = G_OPT, inline = "cut",
+bool   useCutoff   = input.bool(true, "Last Entry Time", group = G_OPT, inline = "cut",
      tooltip = "No new entries on bars that close after this NY time. Off = entries allowed any time after the range locks until the NY day ends.")
-int    cutHour     = input.int(12, "Hr", minval = 0, maxval = 23, group = G_OPT, inline = "cut")
+int    cutHour     = input.int(11, "Hr", minval = 0, maxval = 23, group = G_OPT, inline = "cut")
 int    cutMinute   = input.int(0, "Min", minval = 0, maxval = 59, group = G_OPT, inline = "cut")
+bool   useMaxR     = input.bool(false, "Max Risk (R) Filter", group = G_OPT, inline = "maxr",
+     tooltip = "Skip the trade when the stop distance (R, in points) exceeds this value. Catches days where a huge 9:30 candle puts the stop far away.")
+float  maxRPoints  = input.float(150.0, "Max R (points)", minval = 1.0, step = 5.0, group = G_OPT, inline = "maxr")
 int    maxTradesPerDay = input.int(1, "Max Trades Per Day", minval = 1, maxval = 10, group = G_OPT,
-     tooltip = "Spec default 1: after the first entry (win or lose) no more entries that NY day.")
+     tooltip = "Spec default 1: after the first entry (win or lose) no more entries that NY day. Has no effect while 'First Breakout Only' is ON (that already limits the day to one trade).")
 string dirFilter   = input.string(D_BOTH, "Signal Direction", options = [D_BOTH, D_LONG, D_SHORT], group = G_OPT)
 bool   showTable   = input.bool(true, "Show Info Table", group = G_OPT)
 
@@ -185,6 +203,7 @@ var bool  rangeHasData    = false   // at least one window bar seen today
 var bool  rangeSet        = false   // range locked (window finished) for today
 var int   tradesToday     = 0
 var bool  tradeTakenToday = false
+var bool  firstBreakSeen  = false   // a qualifying body-close breakout has already occurred today
 
 // Daily reset on NY calendar day change (must run BEFORE capture so a new day starts clean).
 if newNyDay
@@ -194,6 +213,7 @@ if newNyDay
     rangeSet        := false
     tradesToday     := 0
     tradeTakenToday := false
+    firstBreakSeen  := false
 
 // Aggregate every bar that opens inside the window (works for 1/3/5/15-min charts alike).
 if inRangeWindow and not rangeSet
@@ -254,26 +274,58 @@ bool allowShortDir = dirFilter != D_LONG
 bool eodReached   = useEod    and closeMinNy >= eodHour * 60 + eodMinute
 bool pastCutoff   = useCutoff and closeMinNy >  cutHour * 60 + cutMinute
 
-// Entry eligibility: range locked, not a range-defining bar, na guard, daily limit, flat, time limits.
-bool canEnter = rangeSet
+// Session eligibility: range locked, not a range-defining bar, na guard, inside entry time limits.
+bool sessionOk = rangeSet
      and not inRangeWindow
      and not na(rangeHigh) and not na(rangeLow)
-     and tradesToday < maxTradesPerDay
-     and strategy.position_size == 0
      and not eodReached
      and not pastCutoff
 
 bool longBreak  = close > rangeHigh and close > open   // bullish body close above range
 bool shortBreak = close < rangeLow  and close < open   // bearish body close below range
 
-bool longSignal  = canEnter and longBreak  and regimeLongOk  and allowLongDir
-bool shortSignal = canEnter and shortBreak and regimeShortOk and allowShortDir
+// First-breakout logic: the first bar of the day with a body-close breakout (either side) is the ONLY
+// candidate when firstBreakOnly is ON. Regime/direction/Max-R/sizing checks are applied to that bar
+// alone; if any fails, the day is finished.
+bool isFirstBreak = sessionOk and (longBreak or shortBreak) and not firstBreakSeen
+bool breakEligible = firstBreakOnly ? isFirstBreak : true
+
+bool canEnter = sessionOk
+     and breakEligible
+     and tradesToday < maxTradesPerDay
+     and strategy.position_size == 0
+
+// Risk (R) in points if entered on this bar, per side.
+float riskLongPts  = close - low
+float riskShortPts = high - close
+
+bool maxROkLong  = not useMaxR or riskLongPts  <= maxRPoints
+bool maxROkShort = not useMaxR or riskShortPts <= maxRPoints
+
+// Position size per side. na -> strategy() default sizing (% of equity mode).
+calcQty(float riskPts) =>
+    float q = na
+    if sizingMode == SZ_FIXED
+        q := float(fixedQty)
+    else if sizingMode == SZ_RISK
+        q := riskPts > 0 ? math.min(math.floor(riskDollars / (riskPts * syminfo.pointvalue)), maxRiskQty) : 0.0
+    q
+
+float qtyLong  = calcQty(riskLongPts)
+float qtyShort = calcQty(riskShortPts)
+bool  qtyOkLong  = na(qtyLong)  or qtyLong  >= 1
+bool  qtyOkShort = na(qtyShort) or qtyShort >= 1
+
+bool longSignal  = canEnter and longBreak  and regimeLongOk  and allowLongDir  and maxROkLong  and qtyOkLong
+bool shortSignal = canEnter and shortBreak and regimeShortOk and allowShortDir and maxROkShort and qtyOkShort
+
+// Consume the day's first breakout (after the signal was evaluated on it).
+if isFirstBreak
+    firstBreakSeen := true
 
 // =====================================================================================================
 // EXECUTION
 // =====================================================================================================
-float orderQty = sizingMode == SZ_FIXED ? float(fixedQty) : na   // na -> use strategy() default sizing
-
 var float slLevel = na
 var float tpLevel = na
 
@@ -283,7 +335,7 @@ if longSignal
     float riskR    = entryRef - stopPx           // > 0 guaranteed: bullish bar => low <= open < close
     slLevel := stopPx
     tpLevel := entryRef + tpMultR * riskR
-    strategy.entry("ORB Long", strategy.long, qty = orderQty)
+    strategy.entry("ORB Long", strategy.long, qty = qtyLong)
     strategy.exit("ORB Long Exit", from_entry = "ORB Long", stop = slLevel, limit = tpLevel,
          comment_loss = "SL", comment_profit = "TP")
     tradesToday     += 1
@@ -295,7 +347,7 @@ if shortSignal
     float riskR    = stopPx - entryRef           // > 0 guaranteed: bearish bar => high >= open > close
     slLevel := stopPx
     tpLevel := entryRef - tpMultR * riskR
-    strategy.entry("ORB Short", strategy.short, qty = orderQty)
+    strategy.entry("ORB Short", strategy.short, qty = qtyShort)
     strategy.exit("ORB Short Exit", from_entry = "ORB Short", stop = slLevel, limit = tpLevel,
          comment_loss = "SL", comment_profit = "TP")
     tradesToday     += 1
