@@ -1,0 +1,14 @@
+code,name,type
+1000,Cash - Operating,asset
+1100,Accounts Receivable,asset
+1200,Inventory,asset
+1500,Equipment,asset
+2000,Accounts Payable,liability
+2100,Sales Tax Payable,liability
+3000,Owner's Equity,equity
+3900,Retained Earnings,equity
+4000,Sales Revenue,revenue
+5000,Cost of Goods Sold,expense
+6000,Rent Expense,expense
+6100,Bank Fees,expense
+6200,Software Subscriptions,expense
