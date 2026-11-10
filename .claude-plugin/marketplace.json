@@ -1,0 +1,23 @@
+{
+  "name": "smart-accountant",
+  "owner": {
+    "name": "Smart-Accountant"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for the Smart-Accountant platform",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "accounting-desk",
+      "source": "./plugins/accounting-desk",
+      "description": "Six-role AI accounting desk: bookkeeping, reconciliation, month-end close, statements, tax prep and audit review.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Smart-Accountant"
+      },
+      "license": "MIT",
+      "keywords": ["accounting", "bookkeeping", "reconciliation", "audit"]
+    }
+  ]
+}

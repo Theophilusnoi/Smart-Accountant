@@ -1,0 +1,23 @@
+date,entry_id,account,debit,credit,memo
+2026-09-01,JE-001,1000,25000.00,,Owner investment
+2026-09-01,JE-001,3000,,25000.00,Owner investment
+2026-09-02,JE-002,6000,1800.00,,September rent
+2026-09-02,JE-002,1000,,1800.00,September rent - check 101
+2026-09-05,JE-003,1200,4200.00,,Inventory purchase - Acme Supply
+2026-09-05,JE-003,2000,,4200.00,Inventory purchase - Acme Supply
+2026-09-10,JE-004,1100,3240.00,,Invoice 1001 - Brightline Co
+2026-09-10,JE-004,4000,,3000.00,Invoice 1001 - Brightline Co
+2026-09-10,JE-004,2100,,240.00,Sales tax 8% on invoice 1001
+2026-09-10,JE-005,5000,1650.00,,Cost of goods on invoice 1001
+2026-09-10,JE-005,1200,,1650.00,Cost of goods on invoice 1001
+2026-09-15,JE-006,2000,4200.00,,Pay Acme Supply - check 102
+2026-09-15,JE-006,1000,,4200.00,Pay Acme Supply - check 102
+2026-09-22,JE-007,1000,3240.00,,Brightline Co pays invoice 1001
+2026-09-22,JE-007,1100,,3240.00,Brightline Co pays invoice 1001
+2026-09-28,JE-008,6200,129.00,,Accounting software - September
+2026-09-28,JE-008,1000,,129.00,Accounting software - September
+2026-09-29,JE-009,1500,2500.00,,Laptop and printer - check 103
+2026-09-29,JE-009,1000,,2500.00,Laptop and printer - check 103
+2026-09-30,JE-010,1000,1080.00,,Cash sale - deposit in transit
+2026-09-30,JE-010,4000,,1000.00,Cash sale
+2026-09-30,JE-010,2100,,80.00,Sales tax 8% on cash sale

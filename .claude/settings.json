@@ -5,9 +5,16 @@
         "source": "github",
         "repo": "galleonlabs/hypergrok-trading-desk"
       }
+    },
+    "smart-accountant": {
+      "source": {
+        "source": "github",
+        "repo": "Theophilusnoi/Smart-Accountant"
+      }
     }
   },
   "enabledPlugins": {
-    "hypergrok@hypergrok": true
+    "hypergrok@hypergrok": true,
+    "accounting-desk@smart-accountant": true
   }
 }

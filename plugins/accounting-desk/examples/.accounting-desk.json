@@ -1,0 +1,6 @@
+{
+  "chart_of_accounts": "books/chart_of_accounts.csv",
+  "journal": "books/journal.csv",
+  "currency": "USD",
+  "locked_through": "2026-08-31"
+}

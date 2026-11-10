@@ -1,0 +1,12 @@
+{
+  "name": "accounting-desk",
+  "description": "An AI accounting desk for Smart-Accountant: six specialist roles, skills and slash commands for bookkeeping, bank reconciliation, month-end close, financial statements, tax preparation and audit review, backed by a deterministic CSV ledger tool and a hook that protects closed periods.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Smart-Accountant"
+  },
+  "homepage": "https://github.com/Theophilusnoi/Smart-Accountant",
+  "repository": "https://github.com/Theophilusnoi/Smart-Accountant",
+  "license": "MIT",
+  "keywords": ["accounting", "bookkeeping", "reconciliation", "month-end-close", "financial-statements", "tax", "audit"]
+}

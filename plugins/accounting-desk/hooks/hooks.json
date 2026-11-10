@@ -1,0 +1,17 @@
+{
+  "description": "Accounting Desk: ask before changing a closed (locked) accounting period",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/period_lock.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
