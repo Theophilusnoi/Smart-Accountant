@@ -38,6 +38,8 @@ grpInd   = "Indicators"
 emaLen   = input.int(9, "EMA Length", minval = 1, group = grpInd)
 emaSrc   = input.source(close, "EMA Source", group = grpInd)
 vwapSrc  = input.source(hlc3, "VWAP Source", group = grpInd)
+vwapAnchor = input.string("Daily (exchange session)", "VWAP Anchor", options = ["Daily (exchange session)", "Session start (uses Session below)"], group = grpInd,
+     tooltip = "Futures like NQ start their daily session at 18:00 New York time. Choose 'Session start' to reset VWAP at the cash open instead (e.g. 09:30).")
 
 grpTrade = "Trading"
 allowLong  = input.bool(true, "Allow Longs", group = grpTrade)
@@ -46,9 +48,21 @@ sizeMode   = input.string("% of Equity", "Order Size Mode", options = ["% of Equ
 equityPct  = input.float(100.0, "% of Equity per Trade", minval = 0.1, maxval = 100, step = 1, group = grpTrade)
 fixedQty   = input.float(1.0, "Fixed Quantity (shares/contracts)", minval = 0.0001, group = grpTrade)
 useSession = input.bool(false, "Only Take Entries Inside Session", group = grpTrade)
-sessionStr = input.session("0930-1600", "Session (exchange time)", group = grpTrade)
+sessionStr = input.session("0930-1600", "Session", group = grpTrade)
+sessionTz  = input.string("America/New_York", "Session Time Zone", group = grpTrade,
+     tooltip = "CME futures use Chicago time by default, so set the session's time zone here explicitly.")
 flatEOD    = input.bool(false, "Close Open Trades When Session Ends", group = grpTrade,
      tooltip = "Optional. Uses the Session above. Off by default so exits follow the EMA rule only.")
+
+grpFilt     = "Filters (all off by default)"
+resetBias   = input.bool(true, "Require Fresh EMA/VWAP Cross Each Day", group = grpFilt,
+     tooltip = "Clears the bias when VWAP resets, so yesterday's crossover cannot trigger trades right after the reset.")
+skipBars    = input.int(0, "Skip Bars After VWAP Reset", minval = 0, group = grpFilt,
+     tooltip = "Right after a reset VWAP sits on top of price and wicks pierce it on almost every bar.")
+minSepTicks = input.int(0, "Min EMA/VWAP Separation (ticks)", minval = 0, group = grpFilt,
+     tooltip = "Skips entries when EMA and VWAP are tangled together (choppy, sideways markets).")
+needEmaSide = input.bool(false, "Entry Candle Must Also Close Beyond EMA", group = grpFilt,
+     tooltip = "Avoids entries that would be exited on the very next bar by the EMA rule.")
 
 grpTF      = "Timeframe"
 intendedTF = input.timeframe("3", "Intended Chart Timeframe", group = grpTF,
@@ -65,15 +79,23 @@ showMarks  = input.bool(true, "Show Signal Markers", group = grpVis)
 // EMA
 emaVal  = ta.ema(emaSrc, emaLen)
 
-// VWAP anchored to the start of each trading day (resets on a new daily bar).
-newDay  = timeframe.change("D")
-vwapVal = ta.vwap(vwapSrc, newDay)
+// Session membership (time zone set explicitly; exchange time differs for futures).
+inSessNow = not na(time(timeframe.period, sessionStr, sessionTz))
+sessStart = inSessNow and not inSessNow[1]
+
+// VWAP: anchored to each new trading day, or to the session open if chosen.
+newDay     = timeframe.change("D")
+vwapReset  = vwapAnchor == "Daily (exchange session)" ? newDay : sessStart
+vwapVal    = ta.vwap(vwapSrc, vwapReset)
+barsSinceReset = ta.barssince(vwapReset)
 
 // ─── Bias (set by EMA/VWAP crossovers) ──────────────────────────────────────
 // bias:  1 = long, -1 = short, 0 = no crossover seen yet.
 var int bias = 0
 crossUp   = ta.crossover(emaVal, vwapVal)
 crossDown = ta.crossunder(emaVal, vwapVal)
+if resetBias and vwapReset
+    bias := 0
 if crossUp
     bias := 1
 else if crossDown
@@ -88,10 +110,13 @@ shortBias = bias == -1 and emaVal < vwapVal
 longWick  = low  < vwapVal and close > vwapVal
 shortWick = high > vwapVal and close < vwapVal
 
-inSession = not useSession or not na(time(timeframe.period, sessionStr))
+inSession  = not useSession or inSessNow
+afterReset = na(barsSinceReset) or barsSinceReset >= skipBars
+separated  = math.abs(emaVal - vwapVal) >= minSepTicks * syminfo.mintick
+filtersOk  = inSession and afterReset and separated and barstate.isconfirmed
 
-longSignal  = allowLong  and longBias  and longWick  and inSession and barstate.isconfirmed
-shortSignal = allowShort and shortBias and shortWick and inSession and barstate.isconfirmed
+longSignal  = allowLong  and longBias  and longWick  and filtersOk and (not needEmaSide or close > emaVal)
+shortSignal = allowShort and shortBias and shortWick and filtersOk and (not needEmaSide or close < emaVal)
 
 // ─── Exit rules (the "EMA break" rule) ──────────────────────────────────────
 exitLongSignal  = strategy.position_size > 0 and close < emaVal
@@ -99,13 +124,17 @@ exitShortSignal = strategy.position_size < 0 and close > emaVal
 
 // Optional end-of-session flatten: true on the first bar after the session
 // closes (the close order fills at the next bar's open).
-inSessNow    = not na(time(timeframe.period, sessionStr))
 sessionEnded = flatEOD and inSessNow[1] and not inSessNow
 
 // ─── Order sizing ───────────────────────────────────────────────────────────
 // Returns the quantity for a new entry based on the chosen mode.
+// Uses the contract's point value (NQ = $20/point), and whole contracts for
+// futures. With $10k on NQ, % of equity rounds to 0 contracts: use Fixed
+// Quantity (or MNQ, $2/point) instead.
+isFutures = syminfo.type == "futures"
 orderQty() =>
-    sizeMode == "Fixed Quantity" ? fixedQty : (strategy.equity * equityPct / 100.0) / close
+    float q = sizeMode == "Fixed Quantity" ? fixedQty : (strategy.equity * equityPct / 100.0) / (close * syminfo.pointvalue)
+    isFutures ? math.floor(q) : q
 
 // Webhook-friendly JSON payload.
 payload(string action) =>
@@ -130,12 +159,24 @@ if sessionEnded and strategy.position_size != 0
     if useAlerts
         alert(payload("exit_all"), alert.freq_once_per_bar_close)
 
-if longSignal and strategy.position_size <= 0
+// Markers show real entries only, not every bar where the conditions hold.
+bool tookLong  = false
+bool tookShort = false
+bool sizeZero  = false
+
+if longSignal and strategy.position_size <= 0 and orderQty() <= 0
+    sizeZero := true
+if shortSignal and strategy.position_size >= 0 and orderQty() <= 0
+    sizeZero := true
+
+if longSignal and strategy.position_size <= 0 and orderQty() > 0
+    tookLong := true
     strategy.entry("Long", strategy.long, qty = orderQty(), comment = "VWAP wick long")
     if useAlerts
         alert(payload("buy"), alert.freq_once_per_bar_close)
 
-if shortSignal and strategy.position_size >= 0
+if shortSignal and strategy.position_size >= 0 and orderQty() > 0
+    tookShort := true
     strategy.entry("Short", strategy.short, qty = orderQty(), comment = "VWAP wick short")
     if useAlerts
         alert(payload("sell"), alert.freq_once_per_bar_close)
@@ -147,16 +188,24 @@ plot(vwapVal, "VWAP", color = color.new(color.blue, 0),   linewidth = 2, style =
 bgcolor(showBiasBg and longBias  ? color.new(color.green, 92) : na, title = "Long Bias")
 bgcolor(showBiasBg and shortBias ? color.new(color.red,   92) : na, title = "Short Bias")
 
-plotshape(showMarks and longSignal,  "Long Signal",  shape.triangleup,   location.belowbar, color.green, size = size.small)
-plotshape(showMarks and shortSignal, "Short Signal", shape.triangledown, location.abovebar, color.red,   size = size.small)
+plotshape(showMarks and tookLong,  "Long Entry",  shape.triangleup,   location.belowbar, color.green, size = size.small)
+plotshape(showMarks and tookShort, "Short Entry", shape.triangledown, location.abovebar, color.red,   size = size.small)
+plotshape(showMarks and exitLongSignal,  "Long Exit",  shape.xcross, location.abovebar, color.new(color.green, 30), size = size.tiny)
+plotshape(showMarks and exitShortSignal, "Short Exit", shape.xcross, location.belowbar, color.new(color.red, 30),   size = size.tiny)
 plotshape(showMarks and crossUp,     "EMA x> VWAP",  shape.circle, location.bottom, color.new(color.green, 40), size = size.tiny)
 plotshape(showMarks and crossDown,   "EMA x< VWAP",  shape.circle, location.top,    color.new(color.red, 40),   size = size.tiny)
 
 // ─── Timeframe warning ──────────────────────────────────────────────────────
-var table tfWarn = table.new(position.top_right, 1, 1)
+var bool everZero = false
+if sizeZero
+    everZero := true
+
+var table tfWarn = table.new(position.top_right, 1, 2)
 if barstate.islast
+    table.clear(tfWarn, 0, 0, 0, 1)
     if timeframe.period != intendedTF
         table.cell(tfWarn, 0, 0, "Chart is " + timeframe.period + ", strategy is built for " + intendedTF,
              text_color = color.white, bgcolor = color.new(color.red, 20), text_size = size.small)
-    else
-        table.clear(tfWarn, 0, 0)
+    if everZero
+        table.cell(tfWarn, 0, 1, "Some signals were skipped: position size rounded to 0 contracts. Use Fixed Quantity.",
+             text_color = color.white, bgcolor = color.new(color.orange, 10), text_size = size.small)
