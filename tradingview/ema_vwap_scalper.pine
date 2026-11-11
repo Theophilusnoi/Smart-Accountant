@@ -31,8 +31,8 @@ strategy("EMA + VWAP Scalper", shorttitle = "EMA/VWAP Scalp", overlay = true,
      slippage                 = 1,        // ticks per fill; edit in Properties
      calc_on_every_tick       = false,    // evaluate on bar close only
      process_orders_on_close  = false,    // fill at the next bar's open
-     margin_long              = 100,
-     margin_short             = 100)
+     margin_long              = 0,        // 0 = no margin check. With 100%, 1 NQ contract
+     margin_short             = 0)        // (~$560k notional) is rejected on a $10k account.
 
 // ─── Inputs ─────────────────────────────────────────────────────────────────
 grpInd   = "Indicators"
