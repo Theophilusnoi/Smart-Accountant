@@ -51,7 +51,7 @@ fixedQty   = input.float(1.0, "Fixed Quantity (shares/contracts)", minval = 0.00
      tooltip = "Default sizing. For futures on a small account use 1 contract (MNQ is $2/point, NQ is $20/point).")
 useSession = input.bool(false, "Only Take Entries Inside Session", group = grpTrade)
 sessionStr = input.session("0930-1600", "Session", group = grpTrade)
-sessionTz  = input.string("America/New_York", "Session Time Zone", group = grpTrade,
+sessionTz  = input.string("America/New_York", "Session Time Zone", options = ["America/New_York", "America/Chicago", "Europe/London", "UTC"], group = grpTrade,
      tooltip = "CME futures use Chicago time by default, so set the session's time zone here explicitly.")
 flatEOD    = input.bool(false, "Close Open Trades When Session Ends", group = grpTrade,
      tooltip = "Optional. Uses the Session above. Off by default so exits follow the EMA rule only.")
@@ -206,7 +206,7 @@ var table tfWarn = table.new(position.bottom_right, 1, 2)
 if barstate.islast
     table.clear(tfWarn, 0, 0, 0, 1)
     if timeframe.period != intendedTF
-        table.cell(tfWarn, 0, 0, "Chart TF " + timeframe.period + " ≠ " + intendedTF,
+        table.cell(tfWarn, 0, 0, "Chart TF " + timeframe.period + " vs intended " + intendedTF,
              text_color = color.white, bgcolor = color.new(color.red, 20), text_size = size.small)
     if everZero
         table.cell(tfWarn, 0, 1, "Size = 0 contracts: set Order Size Mode to Fixed Quantity",
