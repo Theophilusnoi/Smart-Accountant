@@ -16,5 +16,8 @@
   "enabledPlugins": {
     "hypergrok@hypergrok": true,
     "accounting-desk@smart-accountant": true
+  },
+  "env": {
+    "NODE_USE_ENV_PROXY": "1"
   }
 }
