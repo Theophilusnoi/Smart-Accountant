@@ -65,6 +65,14 @@ minSepTicks = input.int(0, "Min EMA/VWAP Separation (ticks)", minval = 0, group 
      tooltip = "Skips entries when EMA and VWAP are tangled together (choppy, sideways markets).")
 needEmaSide = input.bool(false, "Entry Candle Must Also Close Beyond EMA", group = grpFilt,
      tooltip = "Avoids entries that would be exited on the very next bar by the EMA rule.")
+useHtf      = input.bool(false, "Higher-Timeframe Trend Filter", group = grpFilt,
+     tooltip = "Longs only when the higher-timeframe close is above its EMA; shorts only when below. Uses the last COMPLETED higher-timeframe bar, so it does not repaint.")
+htfTF       = input.timeframe("15", "  HTF Timeframe", group = grpFilt)
+htfLen      = input.int(50, "  HTF EMA Length", minval = 1, group = grpFilt)
+
+grpExit     = "Exit"
+exitBars    = input.int(1, "Closes Beyond EMA Needed to Exit", minval = 1, maxval = 10, group = grpExit,
+     tooltip = "1 = original rule (exit on the first close beyond the EMA). 2 = wait for two closes in a row, which keeps winners in strong trends longer but lets losers run a little further.")
 
 grpTF      = "Timeframe"
 intendedTF = input.timeframe("3", "Intended Chart Timeframe", group = grpTF,
@@ -90,6 +98,12 @@ newDay     = timeframe.change("D")
 vwapReset  = vwapAnchor == "Daily (exchange session)" ? newDay : sessStart
 vwapVal    = ta.vwap(vwapSrc, vwapReset)
 barsSinceReset = ta.barssince(vwapReset)
+
+// Higher-timeframe trend: values from the previous completed HTF bar.
+// The [1] offset combined with lookahead_on is the standard non-repainting form.
+[htfClose, htfEma] = request.security(syminfo.tickerid, htfTF, [close[1], ta.ema(close, htfLen)[1]], lookahead = barmerge.lookahead_on)
+htfUp   = not useHtf or (not na(htfEma) and htfClose > htfEma)
+htfDown = not useHtf or (not na(htfEma) and htfClose < htfEma)
 
 // ─── Bias (set by EMA/VWAP crossovers) ──────────────────────────────────────
 // bias:  1 = long, -1 = short, 0 = no crossover seen yet.
@@ -117,12 +131,18 @@ afterReset = na(barsSinceReset) or barsSinceReset >= skipBars
 separated  = math.abs(emaVal - vwapVal) >= minSepTicks * syminfo.mintick
 filtersOk  = inSession and afterReset and separated and barstate.isconfirmed
 
-longSignal  = allowLong  and longBias  and longWick  and filtersOk and (not needEmaSide or close > emaVal)
-shortSignal = allowShort and shortBias and shortWick and filtersOk and (not needEmaSide or close < emaVal)
+longSignal  = allowLong  and longBias  and longWick  and filtersOk and htfUp   and (not needEmaSide or close > emaVal)
+shortSignal = allowShort and shortBias and shortWick and filtersOk and htfDown and (not needEmaSide or close < emaVal)
 
 // ─── Exit rules (the "EMA break" rule) ──────────────────────────────────────
-exitLongSignal  = strategy.position_size > 0 and close < emaVal
-exitShortSignal = strategy.position_size < 0 and close > emaVal
+// Count consecutive closes on each side of the EMA.
+var int closesBelow = 0
+var int closesAbove = 0
+closesBelow := close < emaVal ? closesBelow + 1 : 0
+closesAbove := close > emaVal ? closesAbove + 1 : 0
+
+exitLongSignal  = strategy.position_size > 0 and closesBelow >= exitBars
+exitShortSignal = strategy.position_size < 0 and closesAbove >= exitBars
 
 // Optional end-of-session flatten: true on the first bar after the session
 // closes (the close order fills at the next bar's open).
@@ -185,6 +205,7 @@ if shortSignal and strategy.position_size >= 0 and orderQty() > 0
 
 // ─── Plots ──────────────────────────────────────────────────────────────────
 plot(emaVal,  "EMA",  color = color.new(color.orange, 0), linewidth = 2)
+plot(useHtf ? htfEma : na, "HTF EMA", color = color.new(color.purple, 30), linewidth = 1, style = plot.style_stepline)
 plot(vwapVal, "VWAP", color = color.new(color.blue, 0),   linewidth = 2, style = plot.style_linebr)
 
 bgcolor(showBiasBg and longBias  ? color.new(color.green, 92) : na, title = "Long Bias")
