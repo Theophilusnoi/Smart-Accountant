@@ -1,0 +1,162 @@
+//@version=5
+// ============================================================================
+//  EMA + VWAP Intraday Scalper
+// ----------------------------------------------------------------------------
+//  Rules
+//   • Bias      : EMA crosses OVER the daily VWAP  -> long bias
+//                 EMA crosses UNDER the daily VWAP -> short bias
+//   • Long entry: long bias, the candle's LOW wicks below VWAP, and the candle
+//                 CLOSES above VWAP.
+//   • Short entry: short bias, the candle's HIGH wicks above VWAP, and the
+//                 candle CLOSES below VWAP.
+//   • Exit long : a candle closes below the EMA.
+//   • Exit short: a candle closes above the EMA.
+//   • No fixed take profit or stop loss.
+//
+//  Built for a 3-minute chart. Signals are evaluated on confirmed bar closes
+//  and orders fill at the next bar's open, so the backtest does not repaint.
+//
+//  Trading costs: TradingView does not let inputs change commission or
+//  slippage, so they are set in strategy() below. Change them in
+//  Settings -> Properties ("Commission" and "Slippage").
+// ============================================================================
+strategy("EMA + VWAP Scalper", shorttitle = "EMA/VWAP Scalp", overlay = true,
+     pyramiding               = 0,
+     initial_capital          = 10000,
+     default_qty_type         = strategy.percent_of_equity,
+     default_qty_value        = 100,
+     commission_type          = strategy.commission.percent,
+     commission_value         = 0.01,     // 0.01% per order; edit in Properties
+     slippage                 = 1,        // ticks per fill; edit in Properties
+     calc_on_every_tick       = false,    // evaluate on bar close only
+     process_orders_on_close  = false,    // fill at the next bar's open
+     margin_long              = 100,
+     margin_short             = 100)
+
+// ─── Inputs ─────────────────────────────────────────────────────────────────
+grpInd   = "Indicators"
+emaLen   = input.int(9, "EMA Length", minval = 1, group = grpInd)
+emaSrc   = input.source(close, "EMA Source", group = grpInd)
+vwapSrc  = input.source(hlc3, "VWAP Source", group = grpInd)
+
+grpTrade = "Trading"
+allowLong  = input.bool(true, "Allow Longs", group = grpTrade)
+allowShort = input.bool(true, "Allow Shorts", group = grpTrade)
+sizeMode   = input.string("% of Equity", "Order Size Mode", options = ["% of Equity", "Fixed Quantity"], group = grpTrade)
+equityPct  = input.float(100.0, "% of Equity per Trade", minval = 0.1, maxval = 100, step = 1, group = grpTrade)
+fixedQty   = input.float(1.0, "Fixed Quantity (shares/contracts)", minval = 0.0001, group = grpTrade)
+useSession = input.bool(false, "Only Take Entries Inside Session", group = grpTrade)
+sessionStr = input.session("0930-1600", "Session (exchange time)", group = grpTrade)
+flatEOD    = input.bool(false, "Close Open Trades When Session Ends", group = grpTrade,
+     tooltip = "Optional. Uses the Session above. Off by default so exits follow the EMA rule only.")
+
+grpTF      = "Timeframe"
+intendedTF = input.timeframe("3", "Intended Chart Timeframe", group = grpTF,
+     tooltip = "Strategies run on the chart's timeframe. A warning shows if the chart does not match this value.")
+
+grpAlert   = "Alerts"
+useAlerts  = input.bool(true, "Enable Alerts", group = grpAlert)
+
+grpVis     = "Visuals"
+showBiasBg = input.bool(true, "Shade Background by Bias", group = grpVis)
+showMarks  = input.bool(true, "Show Signal Markers", group = grpVis)
+
+// ─── Indicators ─────────────────────────────────────────────────────────────
+// EMA
+emaVal  = ta.ema(emaSrc, emaLen)
+
+// VWAP anchored to the start of each trading day (resets on a new daily bar).
+newDay  = timeframe.change("D")
+vwapVal = ta.vwap(vwapSrc, newDay)
+
+// ─── Bias (set by EMA/VWAP crossovers) ──────────────────────────────────────
+// bias:  1 = long, -1 = short, 0 = no crossover seen yet.
+var int bias = 0
+crossUp   = ta.crossover(emaVal, vwapVal)
+crossDown = ta.crossunder(emaVal, vwapVal)
+if crossUp
+    bias := 1
+else if crossDown
+    bias := -1
+
+longBias  = bias == 1  and emaVal > vwapVal
+shortBias = bias == -1 and emaVal < vwapVal
+
+// ─── Entry rules (the "wick" rule) ──────────────────────────────────────────
+// Long : low pierces below VWAP, close finishes above VWAP.
+// Short: high pierces above VWAP, close finishes below VWAP.
+longWick  = low  < vwapVal and close > vwapVal
+shortWick = high > vwapVal and close < vwapVal
+
+inSession = not useSession or not na(time(timeframe.period, sessionStr))
+
+longSignal  = allowLong  and longBias  and longWick  and inSession and barstate.isconfirmed
+shortSignal = allowShort and shortBias and shortWick and inSession and barstate.isconfirmed
+
+// ─── Exit rules (the "EMA break" rule) ──────────────────────────────────────
+exitLongSignal  = strategy.position_size > 0 and close < emaVal
+exitShortSignal = strategy.position_size < 0 and close > emaVal
+
+// Optional end-of-session flatten: true on the first bar after the session
+// closes (the close order fills at the next bar's open).
+inSessNow    = not na(time(timeframe.period, sessionStr))
+sessionEnded = flatEOD and inSessNow[1] and not inSessNow
+
+// ─── Order sizing ───────────────────────────────────────────────────────────
+// Returns the quantity for a new entry based on the chosen mode.
+orderQty() =>
+    sizeMode == "Fixed Quantity" ? fixedQty : (strategy.equity * equityPct / 100.0) / close
+
+// Webhook-friendly JSON payload.
+payload(string action) =>
+    '{"action":"' + action + '","ticker":"' + syminfo.ticker + '","price":' + str.tostring(close, format.mintick) +
+     ',"ema":' + str.tostring(emaVal, format.mintick) + ',"vwap":' + str.tostring(vwapVal, format.mintick) + '}'
+
+// ─── Orders ─────────────────────────────────────────────────────────────────
+// Exits are processed first so a bar that closes through the EMA flattens
+// the position before any new signal is considered.
+if exitLongSignal
+    strategy.close("Long", comment = "Close < EMA")
+    if useAlerts
+        alert(payload("exit_long"), alert.freq_once_per_bar_close)
+
+if exitShortSignal
+    strategy.close("Short", comment = "Close > EMA")
+    if useAlerts
+        alert(payload("exit_short"), alert.freq_once_per_bar_close)
+
+if sessionEnded and strategy.position_size != 0
+    strategy.close_all(comment = "Session end")
+    if useAlerts
+        alert(payload("exit_all"), alert.freq_once_per_bar_close)
+
+if longSignal and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, qty = orderQty(), comment = "VWAP wick long")
+    if useAlerts
+        alert(payload("buy"), alert.freq_once_per_bar_close)
+
+if shortSignal and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, qty = orderQty(), comment = "VWAP wick short")
+    if useAlerts
+        alert(payload("sell"), alert.freq_once_per_bar_close)
+
+// ─── Plots ──────────────────────────────────────────────────────────────────
+plot(emaVal,  "EMA",  color = color.new(color.orange, 0), linewidth = 2)
+plot(vwapVal, "VWAP", color = color.new(color.blue, 0),   linewidth = 2, style = plot.style_linebr)
+
+bgcolor(showBiasBg and longBias  ? color.new(color.green, 92) : na, title = "Long Bias")
+bgcolor(showBiasBg and shortBias ? color.new(color.red,   92) : na, title = "Short Bias")
+
+plotshape(showMarks and longSignal,  "Long Signal",  shape.triangleup,   location.belowbar, color.green, size = size.small)
+plotshape(showMarks and shortSignal, "Short Signal", shape.triangledown, location.abovebar, color.red,   size = size.small)
+plotshape(showMarks and crossUp,     "EMA x> VWAP",  shape.circle, location.bottom, color.new(color.green, 40), size = size.tiny)
+plotshape(showMarks and crossDown,   "EMA x< VWAP",  shape.circle, location.top,    color.new(color.red, 40),   size = size.tiny)
+
+// ─── Timeframe warning ──────────────────────────────────────────────────────
+var table tfWarn = table.new(position.top_right, 1, 1)
+if barstate.islast
+    if timeframe.period != intendedTF
+        table.cell(tfWarn, 0, 0, "Chart is " + timeframe.period + ", strategy is built for " + intendedTF,
+             text_color = color.white, bgcolor = color.new(color.red, 20), text_size = size.small)
+    else
+        table.clear(tfWarn, 0, 0)
