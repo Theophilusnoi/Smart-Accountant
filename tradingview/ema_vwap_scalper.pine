@@ -25,8 +25,9 @@ strategy("EMA + VWAP Scalper", shorttitle = "EMA/VWAP Scalp", overlay = true,
      initial_capital          = 10000,
      default_qty_type         = strategy.percent_of_equity,
      default_qty_value        = 100,
-     commission_type          = strategy.commission.percent,
-     commission_value         = 0.01,     // 0.01% per order; edit in Properties
+     commission_type          = strategy.commission.cash_per_contract,
+     commission_value         = 2.5,      // $ per contract per side (futures); edit in Properties.
+                                          // For stocks, switch to a percent commission instead.
      slippage                 = 1,        // ticks per fill; edit in Properties
      calc_on_every_tick       = false,    // evaluate on bar close only
      process_orders_on_close  = false,    // fill at the next bar's open
