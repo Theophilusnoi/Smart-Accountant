@@ -37,6 +37,9 @@ strategy("EMA + VWAP Scalper", shorttitle = "EMA/VWAP Scalp", overlay = true,
 // ─── Inputs ─────────────────────────────────────────────────────────────────
 grpInd   = "Indicators"
 emaLen   = input.int(9, "EMA Length", minval = 1, group = grpInd)
+slowLen  = input.int(21, "Slow EMA Length", minval = 1, group = grpInd,
+     tooltip = "Second, slower EMA (21 by default). Plotted on the chart; can also be used as a trend filter and/or as the exit line.")
+showSlow = input.bool(true, "Show Slow EMA", group = grpInd)
 emaSrc   = input.source(close, "EMA Source", group = grpInd)
 vwapSrc  = input.source(hlc3, "VWAP Source", group = grpInd)
 vwapAnchor = input.string("Daily (exchange session)", "VWAP Anchor", options = ["Daily (exchange session)", "Session start (uses Session below)"], group = grpInd,
@@ -65,12 +68,16 @@ minSepTicks = input.int(0, "Min EMA/VWAP Separation (ticks)", minval = 0, group 
      tooltip = "Skips entries when EMA and VWAP are tangled together (choppy, sideways markets).")
 needEmaSide = input.bool(false, "Entry Candle Must Also Close Beyond EMA", group = grpFilt,
      tooltip = "Avoids entries that would be exited on the very next bar by the EMA rule.")
+useStack    = input.bool(false, "EMA Trend Filter (9 vs 21)", group = grpFilt,
+     tooltip = "Longs only when the fast EMA is above the slow EMA; shorts only when below.")
 useHtf      = input.bool(false, "Higher-Timeframe Trend Filter", group = grpFilt,
      tooltip = "Longs only when the higher-timeframe close is above its EMA; shorts only when below. Uses the last COMPLETED higher-timeframe bar, so it does not repaint.")
 htfTF       = input.timeframe("15", "  HTF Timeframe", group = grpFilt)
 htfLen      = input.int(50, "  HTF EMA Length", minval = 1, group = grpFilt)
 
 grpExit     = "Exit"
+exitLine    = input.string("Fast EMA (9)", "Exit Line", options = ["Fast EMA (9)", "Slow EMA (21)"], group = grpExit,
+     tooltip = "Fast = original rule. Slow = exit on closes beyond the 21 EMA, giving trends more room (bigger winners, bigger losers).")
 exitBars    = input.int(1, "Closes Beyond EMA Needed to Exit", minval = 1, maxval = 10, group = grpExit,
      tooltip = "1 = original rule (exit on the first close beyond the EMA). 2 = wait for two closes in a row, which keeps winners in strong trends longer but lets losers run a little further.")
 
@@ -88,6 +95,10 @@ showMarks  = input.bool(true, "Show Signal Markers", group = grpVis)
 // ─── Indicators ─────────────────────────────────────────────────────────────
 // EMA
 emaVal  = ta.ema(emaSrc, emaLen)
+slowVal = ta.ema(emaSrc, slowLen)
+exitVal = exitLine == "Slow EMA (21)" ? slowVal : emaVal
+stackUp   = not useStack or emaVal > slowVal
+stackDown = not useStack or emaVal < slowVal
 
 // Session membership (time zone set explicitly; exchange time differs for futures).
 inSessNow = not na(time(timeframe.period, sessionStr, sessionTz))
@@ -131,15 +142,15 @@ afterReset = na(barsSinceReset) or barsSinceReset >= skipBars
 separated  = math.abs(emaVal - vwapVal) >= minSepTicks * syminfo.mintick
 filtersOk  = inSession and afterReset and separated and barstate.isconfirmed
 
-longSignal  = allowLong  and longBias  and longWick  and filtersOk and htfUp   and (not needEmaSide or close > emaVal)
-shortSignal = allowShort and shortBias and shortWick and filtersOk and htfDown and (not needEmaSide or close < emaVal)
+longSignal  = allowLong  and longBias  and longWick  and filtersOk and htfUp   and stackUp   and (not needEmaSide or close > emaVal)
+shortSignal = allowShort and shortBias and shortWick and filtersOk and htfDown and stackDown and (not needEmaSide or close < emaVal)
 
 // ─── Exit rules (the "EMA break" rule) ──────────────────────────────────────
 // Count consecutive closes on each side of the EMA.
 var int closesBelow = 0
 var int closesAbove = 0
-closesBelow := close < emaVal ? closesBelow + 1 : 0
-closesAbove := close > emaVal ? closesAbove + 1 : 0
+closesBelow := close < exitVal ? closesBelow + 1 : 0
+closesAbove := close > exitVal ? closesAbove + 1 : 0
 
 exitLongSignal  = strategy.position_size > 0 and closesBelow >= exitBars
 exitShortSignal = strategy.position_size < 0 and closesAbove >= exitBars
@@ -205,6 +216,7 @@ if shortSignal and strategy.position_size >= 0 and orderQty() > 0
 
 // ─── Plots ──────────────────────────────────────────────────────────────────
 plot(emaVal,  "EMA",  color = color.new(color.orange, 0), linewidth = 2)
+plot(showSlow ? slowVal : na, "Slow EMA", color = color.new(color.fuchsia, 0), linewidth = 2)
 plot(useHtf ? htfEma : na, "HTF EMA", color = color.new(color.purple, 30), linewidth = 1, style = plot.style_stepline)
 plot(vwapVal, "VWAP", color = color.new(color.blue, 0),   linewidth = 2, style = plot.style_linebr)
 
