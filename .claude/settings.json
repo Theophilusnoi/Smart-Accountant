@@ -11,10 +11,17 @@
         "source": "github",
         "repo": "Theophilusnoi/Smart-Accountant"
       }
+    },
+    "cli-anything": {
+      "source": {
+        "source": "github",
+        "repo": "HKUDS/CLI-Anything"
+      }
     }
   },
   "enabledPlugins": {
     "hypergrok@hypergrok": true,
-    "accounting-desk@smart-accountant": true
+    "accounting-desk@smart-accountant": true,
+    "cli-anything@cli-anything": true
   }
 }
