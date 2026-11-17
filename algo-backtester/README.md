@@ -51,6 +51,10 @@ profile can clear or bypass it. Real multi-device accounts would need a backend 
   become p1–p3), variables, `if / else if / else`, `strategy.entry / close / close_all`, `when=`, `plot()`, and common `ta.*` / `math.*`
   functions, plus `[macd, signal, hist] = ta.macd(...)` and `[middle, upper, lower] = ta.bb(...)`. Anything it can't convert is listed. Not supported: `strategy.exit` levels (use the Risk panel), `var`/`:=` state,
   custom functions, other multi-value functions (`ta.kc`, `ta.dmi`, `ta.supertrend`), `request.security`, arrays and loops.
+- **Export to Pine Script**: turns the current setup (any built-in setup or your custom rules) plus the Risk & costs settings
+  into a TradingView Pine v5 strategy: same signals, next-bar-open fills, ATR stop, R target, breakeven, trailing stop,
+  % risk sizing and max bars held, with every setting exposed as an input. Order-flow values are estimated from bar shape,
+  since TradingView's standard volume has no buy/sell split; the export window lists any such differences.
 - Presets and last settings are saved in your browser.
 
 Backtest results are hypothetical and are not a guarantee of future performance.

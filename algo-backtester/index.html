@@ -262,6 +262,15 @@ a.btn.primary { color: #1a1408; }
 .ocard .go { font-family: var(--font-data); font-size: 12px; color: var(--brass); margin-top: 4px; }
 .tips { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 24px; color: var(--muted); font-size: 14px; margin: 0; padding-left: 18px; }
 
+/* Pine export window */
+.modal { position: fixed; inset: 0; z-index: 30; background: rgba(5,9,14,.72); display: grid; place-items: center;
+  padding: calc(16px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+.modal-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; width: min(860px, 100%); max-height: 100%; display: flex; flex-direction: column; gap: 12px; padding: 18px; min-width: 0; box-shadow: 0 30px 80px rgba(0,0,0,.6); }
+.modal-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.modal-head h2 { font-family: var(--font-display); font-weight: 600; font-size: 20px; margin: 0; }
+.pine-steps { margin: 0; padding-left: 18px; display: grid; gap: 2px; font-size: 13px; }
+.pine-notes ul { margin: 0; padding: 10px 12px 10px 28px; background: rgba(224,169,67,.08); border: 1px solid rgba(224,169,67,.3); border-radius: 6px; font-size: 12.5px; display: grid; gap: 4px; }
+#pineCode { flex: 1; min-height: 240px; width: 100%; background: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 12px; font-family: var(--font-data); font-size: 12px; line-height: 1.55; resize: vertical; white-space: pre; overflow: auto; }
 /* install hint (iPhone / iPad Safari) */
 .ioshint { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   z-index: 25; background: var(--panel); border: 1px solid var(--brass); border-radius: 10px; padding: 12px 14px; display: flex; gap: 12px; align-items: center; justify-content: space-between;
@@ -505,6 +514,7 @@ close &gt; <span class="f">bbUpper</span>(close, <span class="n">20</span>, <spa
         <label class="f">Trade direction<select id="dirSel">
           <option value="both">Long and short</option><option value="long">Long only</option><option value="short">Short only</option>
         </select></label>
+        <div class="btns"><button class="btn" id="exportPine" type="button">Export to Pine Script</button></div>
       </div>
     </details>
 
@@ -617,6 +627,15 @@ close &gt; <span class="f">bbUpper</span>(close, <span class="n">20</span>, <spa
   </main>
 </div>
 </div>
+<div id="pineModal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pineTitle">
+    <div class="modal-head"><h2 id="pineTitle">Pine Script for TradingView</h2><button class="btn" type="button" id="pineClose">Close</button></div>
+    <ol class="hint pine-steps"><li>Copy the code below.</li><li>In TradingView, open <b>Pine Editor</b> at the bottom of a chart, paste over the template, and click <b>Add to chart</b> (or <b>Save</b>).</li><li>Open <b>Strategy Tester</b> to see its results. Every setting appears under the strategy's <b>Settings → Inputs</b>.</li></ol>
+    <div id="pineNotes" class="pine-notes"></div>
+    <textarea id="pineCode" readonly spellcheck="false" aria-label="Pine Script code"></textarea>
+    <div class="btns"><button class="btn primary" type="button" id="pineCopy">Copy code</button><button class="btn" type="button" id="pineDownload">Download .pine</button><span class="hint" id="pineMsg"></span></div>
+  </div>
+</div>
 <div id="toasts" aria-live="polite"></div>
 <div id="iosHint" class="ioshint" hidden role="dialog" aria-label="Install FlowDesk">
   <div><b>Install FlowDesk on your iPhone</b><br>Tap <span class="shareglyph" aria-label="Share">⬆︎</span> <b>Share</b> in Safari, then <b>Add to Home Screen</b>.</div>
@@ -706,7 +725,7 @@ const RULE = (() => {
     }
     return out;
   }
-  function parse(src, params) {
+  function parse(src, params, keepParams) {
     const tk = tokenize(src); let p = 0;
     const peek = () => tk[p], isOp = v => tk[p] && tk[p].t === "op" && tk[p].v === v;
     const expect = v => { if (!isOp(v)) throw new Error(`Expected "${v}"${tk[p] ? ` before "${tk[p].v}"` : " at the end"}`); p++; };
@@ -731,7 +750,7 @@ const RULE = (() => {
           return { t: "call", name: t.v, args };
         }
         if (SERIES.includes(t.v)) return { t: "ser", name: t.v };
-        if (t.v in params) return { t: "num", v: params[t.v] };
+        if (t.v in params) return keepParams ? { t: "par", name: t.v, v: params[t.v] } : { t: "num", v: params[t.v] };
         if (t.v === "true" || t.v === "false") return { t: "num", v: t.v === "true" ? 1 : 0 };
         throw new Error(`Unknown name "${t.v}". Names are case-sensitive, e.g. deltaPct, cumDelta.`);
       }
@@ -777,7 +796,7 @@ const RULE = (() => {
   function ev(n, ctx, i) {
     const E = x => evaluate(x, ctx, i), N = ctx.n;
     switch (n.t) {
-      case "num": return n.v;
+      case "num": case "par": return n.v;
       case "ser": return ctx.get(n.name);
       case "idx": { const a = E(n.a), k = E(n.k); if (isArr(k)) throw new Error("The number inside [ ] must be a plain number, like close[1]"); return isArr(a) ? shift(a, Math.max(0, Math.round(k))) : a; }
       case "un": { const a = E(n.a); if (n.op === "not") return truthy(at(a, i)) ? 0 : 1; return isArr(a) ? a.map(v => -v) : -a; }
@@ -829,6 +848,7 @@ const RULE = (() => {
   }
   return {
     compile(src, params) { const s = (src || "").trim(); return s ? parse(s, params) : null; },
+    ast(src, params) { return parse(src, params, true); },
     test(node, ctx, i) { return node ? truthy(at(evaluate(node, ctx, i), i)) : false; },
     series(node, ctx) { const r = evaluate(node, ctx, ctx.n - 1); return asArr(r, ctx.n); },
     context,
@@ -1560,6 +1580,240 @@ document.querySelectorAll("[data-tab]").forEach(t => t.onclick = () => {
   document.querySelectorAll("[data-tab]").forEach(x => x.setAttribute("aria-selected", x === t));
   document.querySelectorAll("[data-panel]").forEach(p => p.hidden = p.dataset.panel !== t.dataset.tab);
 });
+
+
+/* ============================== Export to Pine Script ==============================
+   Turns the current setup (built-in or custom rules) plus the Risk & costs settings into a
+   TradingView Pine v5 strategy that follows the same logic: signals on bar close, fills at the
+   next open, ATR stop, R target, breakeven, trailing stop, % risk sizing and max bars held. */
+
+/* The built-in setups written in the rule language, using their own parameter names. */
+const BUILTIN_RULES = {
+  flow_momentum: { longEntry: "volume > volMult * sma(volume, volLen) and deltaPct > deltaTh and close > ema(close, trend)",
+    shortEntry: "volume > volMult * sma(volume, volLen) and deltaPct < -deltaTh and close < ema(close, trend)",
+    exitLong: "crossDown(close, ema(close, trend))", exitShort: "crossUp(close, ema(close, trend))", plot: "ema(close, trend)" },
+  absorption: { longEntry: "volume > volMult * sma(volume, volLen) and range < rangeMax * atr(14)[1] and deltaPct < -deltaTh and close >= open and close < vwap",
+    shortEntry: "volume > volMult * sma(volume, volLen) and range < rangeMax * atr(14)[1] and deltaPct > deltaTh and close <= open and close > vwap",
+    exitLong: "", exitShort: "", plot: "vwap" },
+  delta_divergence: { longEntry: "low < lowest(low, look)[1] and cumDelta > lowest(cumDelta, look)[1] and close > open",
+    shortEntry: "high > highest(high, look)[1] and cumDelta < highest(cumDelta, look)[1] and close < open",
+    exitLong: "crossDown(close, ema(close, trend))", exitShort: "crossUp(close, ema(close, trend))", plot: "ema(close, trend)" },
+  ema_cross: { longEntry: "crossUp(ema(close, fast), ema(close, slow))", shortEntry: "crossDown(ema(close, fast), ema(close, slow))",
+    exitLong: "crossDown(ema(close, fast), ema(close, slow))", exitShort: "crossUp(ema(close, fast), ema(close, slow))", plot: "ema(close, fast); ema(close, slow)" },
+  rsi_revert: { longEntry: "rsi(close, len)[1] < lo and rsi(close, len) >= lo", shortEntry: "rsi(close, len)[1] > hi and rsi(close, len) <= hi",
+    exitLong: "rsi(close, len)[1] > 50 and rsi(close, len) <= 50", exitShort: "rsi(close, len)[1] < 50 and rsi(close, len) >= 50", plot: "" },
+  breakout: { longEntry: "close > highest(high, len)[1]", shortEntry: "close < lowest(low, len)[1]",
+    exitLong: "close < lowest(low, exitLen)[1]", exitShort: "close > highest(high, exitLen)[1]", plot: "highest(high, len)[1]; lowest(low, len)[1]" },
+  vwap_revert: { longEntry: "(close - vwap) / atr(14) < -k and close > open", shortEntry: "(close - vwap) / atr(14) > k and close < open",
+    exitLong: "high >= vwap and low <= vwap", exitShort: "high >= vwap and low <= vwap", plot: "vwap" },
+};
+
+const PINE = (() => {
+  const PREC = { or: 1, and: 2, "<": 3, "<=": 3, ">": 3, ">=": 3, "==": 3, "!=": 3, "+": 4, "-": 4, "*": 5, "/": 5, "%": 5 };
+  const CMP = new Set(["<", "<=", ">", ">=", "==", "!="]);
+  const num = v => Number.isInteger(v) ? String(v) : String(+v.toPrecision(10));
+  const flt = v => Number.isInteger(v) ? v + ".0" : num(v);
+  const par = (x, need) => x.p < need ? `(${x.s})` : x.s;
+  const hist = (x, k) => `${x.p >= 9 ? x.s : `(${x.s})`}[${k}]`;
+  const FLOW = { buyVolume: "fdBuyVol", sellVolume: "fdSellVol", delta: "fdDelta", deltaPct: "fdDeltaPct", cumDelta: "fdCumDelta" };
+  function expr(n, ctx, logical) {
+    const E = (x, lg = false) => expr(x, ctx, lg), A = s => ({ s, p: 9 }), B = s => ({ s, p: 3, bool: true });
+    switch (n.t) {
+      case "num": return logical ? { s: n.v ? "true" : "false", p: 9, bool: true } : A(num(n.v));
+      case "par": ctx.params.add(n.name); return A(n.name);
+      case "ser":
+        if (FLOW[n.name]) { ctx.flow = true; return A(FLOW[n.name]); }
+        if (n.name === "range") return A("(high - low)");
+        if (n.name === "vwap") { ctx.vwap = true; return A("ta.vwap(hlc3)"); }
+        if (n.name === "hour") { ctx.time = true; return A('hour(time, "UTC")'); }
+        if (n.name === "dayofweek") { ctx.time = true; return A('(dayofweek(time, "UTC") - 1)'); }
+        return A(n.name);
+      case "idx": { const a = E(n.a), k = E(n.k); return A(hist(a, k.s)); }
+      case "un": { const a = E(n.a, n.op === "not"); return n.op === "not" ? { s: `not ${par(a, 8)}`, p: 8, bool: true } : { s: `-${par(a, 8)}`, p: 8 }; }
+      case "bin": {
+        const lg = n.op === "and" || n.op === "or", p = PREC[n.op], a = E(n.a, lg), b = E(n.b, lg);
+        const la = CMP.has(n.op) ? par(a, 4) : par(a, p), rb = CMP.has(n.op) ? par(b, 4) : (n.op === "+" || n.op === "*" || lg) ? par(b, p) : par(b, p + 1);
+        return { s: `${la} ${n.op} ${rb}`, p, bool: lg || CMP.has(n.op) };
+      }
+      case "call": {
+        const a = n.args.map(x => E(x)), s = i => a[i].s, d = (i, v) => a[i] ? a[i].s : String(v);
+        switch (n.name) {
+          case "ema": case "sma": case "rsi": case "highest": case "lowest": case "stdev": ctx.lengths.push(n.args[1]); return A(`ta.${n.name}(${s(0)}, ${s(1)})`);
+          case "atr": ctx.lengths.push(n.args[0]); return A(`ta.atr(${s(0)})`);
+          case "change": return A(`ta.change(${s(0)}, ${d(1, 1)})`);
+          case "abs": return A(`math.abs(${s(0)})`);
+          case "min": case "max": return A(`math.${n.name}(${s(0)}, ${s(1)})`);
+          case "crossUp": return { s: `ta.crossover(${s(0)}, ${s(1)})`, p: 9, bool: true };
+          case "crossDown": return { s: `ta.crossunder(${s(0)}, ${s(1)})`, p: 9, bool: true };
+          case "rising": case "falling": return B(`${par(a[0], 4)} ${n.name === "rising" ? ">" : "<"} ${hist(a[0], d(1, 1))}`);
+          case "macd": case "macdSignal": case "macdHist": {
+            [1, 2, 3].forEach(i => n.args[i] && ctx.lengths.push(n.args[i]));
+            const line = `ta.ema(${s(0)}, ${d(1, 12)}) - ta.ema(${s(0)}, ${d(2, 26)})`, sig = `ta.ema(${line}, ${d(3, 9)})`;
+            return n.name === "macd" ? A(`(${line})`) : n.name === "macdSignal" ? A(sig) : A(`(${line} - ${sig})`);
+          }
+          case "bbMiddle": return A(`ta.sma(${s(0)}, ${d(1, 20)})`);
+          case "bbUpper": case "bbLower": return A(`(ta.sma(${s(0)}, ${d(1, 20)}) ${n.name === "bbUpper" ? "+" : "-"} ${d(2, 2)} * ta.stdev(${s(0)}, ${d(1, 20)}))`);
+        }
+      }
+    }
+    throw new Error("Can't export this expression");
+  }
+  function cond(src, P, ctx, label) {
+    const s = (src || "").trim(); if (!s) return "false";
+    let ast; try { ast = RULE.ast(s, P); } catch (e) { throw new Error(`${label}: ${e.message}`); }
+    const r = expr(ast, ctx, true); return r.bool ? r.s : `${par(r, 4)} != 0`;
+  }
+  const q = s => '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+
+  return function build(stratKey, P, R) {
+    const S = STRATS[stratKey], rules = S.custom ? P : BUILTIN_RULES[stratKey];
+    const nums = {}; S.params.forEach(p => nums[p.k] = P[p.k]);
+    const ctx = { params: new Set(), flow: false, vwap: false, time: false, lengths: [] };
+    const L = cond(rules.longEntry, nums, ctx, "Buy rule"), Sh = cond(rules.shortEntry, nums, ctx, "Sell rule");
+    const XL = cond(rules.exitLong, nums, ctx, "Close-long rule"), XS = cond(rules.exitShort, nums, ctx, "Close-short rule");
+    const plots = String(rules.plot || "").split(";").map(x => x.trim()).filter(Boolean).map((src, k) => {
+      try { const r = expr(RULE.ast(src, nums), ctx, false); return `plot(${r.s}, ${q(src.length > 40 ? src.slice(0, 38) + "…" : src)}, color=${["color.orange", "color.blue", "color.purple", "color.teal"][k % 4]})`; } catch { return null; }
+    }).filter(Boolean);
+    const notes = [];
+    // inputs: only the parameters the rules actually use
+    const lenParams = new Set(ctx.lengths.filter(x => x && x.t === "par").map(x => x.name));
+    const inputs = S.params.filter(p => ctx.params.has(p.k)).map(p => {
+      const v = P[p.k], isInt = Number.isInteger(v) && (S.custom || p.s >= 1);
+      if (lenParams.has(p.k) && !Number.isInteger(v)) notes.push(`${p.k} = ${v} is used as a length, which TradingView requires to be a whole number. Change it to a whole number.`);
+      const title = S.custom ? p.k : p.l;
+      return `${p.k} = ${isInt ? "input.int" : "input.float"}(${isInt ? num(v) : flt(v)}, ${q(title)}, group="Setup")`;
+    });
+    if (ctx.flow) notes.push("Delta, buy/sell volume and cumulative delta are estimated from where each bar closes in its range, because TradingView's standard volume has no buy/sell split. Results match FlowDesk on CSV data without buy volume, and can differ from FlowDesk on Binance data.");
+    if (ctx.vwap) notes.push("VWAP uses TradingView's session VWAP (ta.vwap). FlowDesk resets VWAP each UTC day, so intraday values can differ if your chart's session isn't UTC.");
+    if (ctx.time) notes.push("hour and dayofweek are read in UTC, as in FlowDesk.");
+    if (R.slipPct > 0) notes.push(`Slippage (${R.slipPct}%) isn't exported: TradingView sets slippage in ticks. Set it in the strategy's Properties tab.`);
+    const dirTxt = { both: "Long and short", long: "Long only", short: "Short only" }[R.dir];
+    const today = new Date().toISOString().slice(0, 10);
+    const lines = [
+      "//@version=5",
+      `// Exported from FlowDesk on ${today}: ${S.name}`,
+      "// Signals are checked when a bar closes and filled at the next bar's open, as in FlowDesk.",
+      "// Small differences from FlowDesk can come from data, fills and rounding.",
+      "// Backtest results are hypothetical and not financial advice.",
+      `strategy(${q("FlowDesk · " + S.name)}, overlay=true, initial_capital=${num(R.capital)}, pyramiding=0, commission_type=strategy.commission.percent, commission_value=${num(R.commPct)})`,
+      "",
+      ...(inputs.length ? ["// ── Setup", ...inputs, ""] : []),
+      "// ── Risk & costs (same meaning as FlowDesk's Risk panel; 0 turns an option off)",
+      `riskPct     = input.float(${flt(R.riskPct)}, "Risk per trade %", group="Risk")`,
+      `stopAtr     = input.float(${flt(R.stopAtr)}, "Stop (× ATR)", group="Risk")`,
+      `tpR         = input.float(${flt(R.tpR)}, "Target (R)", group="Risk")`,
+      `atrLen      = input.int(${num(R.atrLen)}, "ATR length", group="Risk")`,
+      `beR         = input.float(${flt(R.beR)}, "Breakeven at (R)", group="Risk")`,
+      `trailAtr    = input.float(${flt(R.trailAtr)}, "Trailing stop (× ATR)", group="Risk")`,
+      `trailStartR = input.float(${flt(R.trailStartR)}, "Trail starts at (R)", group="Risk")`,
+      `maxBars     = input.int(${num(R.maxBars)}, "Max bars held", group="Risk")`,
+      `maxLev      = input.float(${flt(R.maxLev)}, "Max leverage", group="Risk")`,
+      `tradeDir    = input.string(${q(dirTxt)}, "Trade direction", options=["Long and short", "Long only", "Short only"], group="Risk")`,
+      "",
+      ...(ctx.flow ? [
+        "// ── Estimated order flow (close location within the bar's range)",
+        "fdBuyVol   = high > low ? volume * (close - low) / (high - low) : volume * 0.5",
+        "fdSellVol  = volume - fdBuyVol",
+        "fdDelta    = fdBuyVol - fdSellVol",
+        "fdDeltaPct = volume > 0 ? fdDelta / volume * 100 : 0.0",
+        "fdCumDelta = ta.cum(fdDelta)",
+        ""] : []),
+      "// ── Rules",
+      `longSignal      = ${L}`,
+      `shortSignal     = ${Sh}`,
+      `exitLongSignal  = ${XL}`,
+      `exitShortSignal = ${XS}`,
+      "allowLong  = tradeDir != \"Short only\"",
+      "allowShort = tradeDir != \"Long only\"",
+      "goLong  = longSignal and not shortSignal",
+      "goShort = shortSignal and not longSignal",
+      "",
+      "// ── Sizing: risk a % of equity per trade, capped by leverage",
+      "atrV = ta.atr(atrLen)",
+      "stopDistNow = stopAtr > 0 ? stopAtr * atrV : 0.0",
+      "qtyFor(dist) =>",
+      "    raw = dist > 0 ? strategy.equity * riskPct / 100 / dist : strategy.equity * riskPct / 100 / close",
+      "    math.max(0.0, math.min(raw, strategy.equity * maxLev / close))",
+      "lossTicks(dist) => dist > 0 ? dist / syminfo.mintick : na",
+      "profitTicks(dist) => dist > 0 and tpR > 0 ? tpR * dist / syminfo.mintick : na",
+      "",
+      "var float entryStopDist = na",
+      "var int   entryBar      = na",
+      "var float best          = na",
+      "var float stopLvl       = na",
+      "",
+      "// ── Exits on signal (an opposite signal reverses the trade, like FlowDesk)",
+      "if strategy.position_size > 0 and (exitLongSignal or (goShort and not allowShort))",
+      "    strategy.close(\"Long\", comment=\"signal\")",
+      "if strategy.position_size < 0 and (exitShortSignal or (goLong and not allowLong))",
+      "    strategy.close(\"Short\", comment=\"signal\")",
+      "",
+      "// ── Entries, with stop and target attached from the actual fill price",
+      "if goLong and allowLong and strategy.position_size <= 0",
+      "    entryStopDist := stopDistNow",
+      "    strategy.entry(\"Long\", strategy.long, qty=qtyFor(stopDistNow))",
+      "    strategy.exit(\"XL\", \"Long\", loss=lossTicks(stopDistNow), profit=profitTicks(stopDistNow), comment_loss=\"stop\", comment_profit=\"target\")",
+      "if goShort and allowShort and strategy.position_size >= 0",
+      "    entryStopDist := stopDistNow",
+      "    strategy.entry(\"Short\", strategy.short, qty=qtyFor(stopDistNow))",
+      "    strategy.exit(\"XS\", \"Short\", loss=lossTicks(stopDistNow), profit=profitTicks(stopDistNow), comment_loss=\"stop\", comment_profit=\"target\")",
+      "",
+      "// ── Breakeven and trailing stop: start from the initial stop and only ever tighten it.",
+      "//    They use this bar's data and apply from the next bar, as in FlowDesk.",
+      "newPos = strategy.position_size != 0 and math.sign(strategy.position_size) != math.sign(nz(strategy.position_size[1]))",
+      "if strategy.position_size == 0 or newPos",
+      "    best := na",
+      "    stopLvl := na",
+      "    entryBar := strategy.position_size != 0 ? bar_index : na",
+      "if strategy.position_size != 0",
+      "    isLong = strategy.position_size > 0",
+      "    ep = strategy.position_avg_price",
+      "    best := isLong ? math.max(nz(best, high), high) : math.min(nz(best, low), low)",
+      "    if newPos and entryStopDist > 0",
+      "        stopLvl := isLong ? ep - entryStopDist : ep + entryStopDist",
+      "    gain = isLong ? best - ep : ep - best",
+      "    if beR > 0 and entryStopDist > 0 and gain >= beR * entryStopDist",
+      "        stopLvl := na(stopLvl) ? ep : isLong ? math.max(stopLvl, ep) : math.min(stopLvl, ep)",
+      "    if trailAtr > 0 and (trailStartR <= 0 or not (entryStopDist > 0) or gain >= trailStartR * entryStopDist)",
+      "        lvl = isLong ? best - trailAtr * atrV : best + trailAtr * atrV",
+      "        stopLvl := na(stopLvl) ? lvl : isLong ? math.max(stopLvl, lvl) : math.min(stopLvl, lvl)",
+      "    if isLong",
+      "        strategy.exit(\"XL\", \"Long\", loss=lossTicks(entryStopDist), profit=profitTicks(entryStopDist), stop=stopLvl, comment_loss=\"stop\", comment_profit=\"target\")",
+      "    else",
+      "        strategy.exit(\"XS\", \"Short\", loss=lossTicks(entryStopDist), profit=profitTicks(entryStopDist), stop=stopLvl, comment_loss=\"stop\", comment_profit=\"target\")",
+      "    if maxBars > 0 and bar_index - entryBar + 1 >= maxBars",
+      "        strategy.close_all(comment=\"time\", immediately=true)",
+      "",
+      ...(plots.length ? ["// ── Lines", ...plots] : []),
+      "plotshape(goLong and allowLong, \"Buy signal\", shape.triangleup, location.belowbar, color.teal, size=size.tiny)",
+      "plotshape(goShort and allowShort, \"Sell signal\", shape.triangledown, location.abovebar, color.red, size=size.tiny)",
+    ];
+    return { code: lines.join("\n") + "\n", notes };
+  };
+})();
+
+function openPineExport() {
+  let out;
+  try { out = PINE($("stratSel").value, readParams(), readRisk()); }
+  catch (e) { toast("Can't export yet: " + e.message); return; }
+  $("pineCode").value = out.code;
+  $("pineNotes").innerHTML = out.notes.length ? `<ul>${out.notes.map(n => `<li>${escHtml(n)}</li>`).join("")}</ul>` : "";
+  $("pineMsg").textContent = "";
+  $("pineModal").hidden = false; $("pineCopy").focus();
+}
+$("exportPine").onclick = openPineExport;
+$("pineClose").onclick = () => { $("pineModal").hidden = true; $("exportPine").focus(); };
+$("pineModal").addEventListener("click", e => { if (e.target === $("pineModal")) $("pineClose").click(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("pineModal").hidden) $("pineClose").click(); });
+$("pineCopy").onclick = () => {
+  const t = $("pineCode").value;
+  navigator.clipboard.writeText(t).then(() => $("pineMsg").textContent = "Copied. Paste it into TradingView's Pine Editor.",
+    () => { $("pineCode").focus(); $("pineCode").select(); $("pineMsg").textContent = "Copy was blocked here. The code is selected: press Ctrl+C (or ⌘C)."; });
+};
+$("pineDownload").onclick = () => {
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([$("pineCode").value], { type: "text/plain" }));
+  a.download = "flowdesk-" + $("stratSel").value + ".pine"; a.click(); $("pineMsg").textContent = "If nothing downloaded, use Copy instead.";
+};
 
 /* ============================== Optimizer ============================== */
 function range(a, z, s) { const o = []; if (!(s > 0)) return [a]; for (let v = a; v <= z + 1e-9 && o.length < 60; v += s) o.push(+v.toFixed(6)); return o; }
