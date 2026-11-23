@@ -32,8 +32,8 @@
 //    Create Alert → this strategy → "alert() function calls only".
 // =====================================================================================
 strategy("Smooth Trader Toolkit - Confluence Strategy", shorttitle = "STT Confluence", overlay = true,
-     initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10,
-     commission_type = strategy.commission.percent, commission_value = 0.04, slippage = 1,
+     initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 2.5, slippage = 1,
      process_orders_on_close = true, max_labels_count = 500, max_bars_back = 1000)
 
 // =====================================================================================
@@ -110,6 +110,20 @@ minRR       = input.float(1.0, "Min RR for Level Target", minval = 0.1, step = 0
      tooltip = "A structural target is only used if it offers at least this RR; otherwise the fixed RR target is used.")
 stopBufPct  = input.float(0.05, "Stop Buffer %", minval = 0.0, step = 0.01, group = G_RISK) / 100.0
 showRisk    = input.bool(true, "Plot Active Stop / Target", group = G_RISK)
+
+// Position sizing. Futures (NQ, ES, ...) have large contract values, so "% of Equity"
+// with a small account rounds to 0 contracts and no trades are placed – use
+// "Fixed Qty" or "Risk % of Equity" (with "Min 1 Unit") for futures.
+const string Q_FIXED = "Fixed Qty (contracts/shares)"
+const string Q_EQ    = "% of Equity"
+const string Q_RISK  = "Risk % of Equity"
+const string G_SIZE  = "Position Sizing"
+qtyMode   = input.string(Q_FIXED, "Sizing Mode", options = [Q_FIXED, Q_EQ, Q_RISK], group = G_SIZE)
+qtyFixed  = input.float(1.0, "Fixed Qty", minval = 0.0001, group = G_SIZE)
+qtyEqPct  = input.float(10.0, "% of Equity", minval = 0.1, group = G_SIZE) / 100.0
+qtyRisk   = input.float(1.0, "Risk % per Trade", minval = 0.05, step = 0.05, group = G_SIZE) / 100.0
+qtyFrac   = input.bool(false, "Allow Fractional Qty (crypto)", group = G_SIZE)
+qtyMinOne = input.bool(true, "Min 1 Unit when calc rounds to 0", group = G_SIZE)
 
 cVwap   = input.color(color.new(#2962FF, 0), "Anchored VWAP", group = G_COL)
 cPoc    = input.color(color.new(color.white, 0), "POC", group = G_COL)
@@ -308,6 +322,15 @@ f_levelTarget(float entry, float risk, array<float> lvls, bool isLong) =>
 supLevels = array.from(useWalls ? putWall : na, useVA ? vVal : na, usePOC ? vPoc : na, useVwapLvl ? avwap : na)
 resLevels = array.from(useWalls ? callWall : na, useVA ? vVah : na, usePOC ? vPoc : na, useVwapLvl ? avwap : na)
 
+// Order size in contracts/shares/units, using the symbol's point value (NQ = $20/pt).
+f_qty(float entry, float risk) =>
+    float pv  = syminfo.pointvalue
+    float raw = qtyMode == Q_FIXED ? qtyFixed :
+         qtyMode == Q_EQ    ? strategy.equity * qtyEqPct / (entry * pv) :
+                              strategy.equity * qtyRisk / (risk * pv)
+    float q = qtyFrac ? raw : math.floor(nz(raw))
+    q <= 0 and qtyMinOne and not qtyFrac ? 1.0 : q
+
 // =====================================================================================
 // ORDERS
 // =====================================================================================
@@ -321,11 +344,12 @@ if longSignal and strategy.position_size <= 0
     float stopRef = na(nearSup) ? low : math.min(low, nearSup)
     float stp     = stopRef * (1 - stopBufPct)
     float risk    = close - stp
-    if risk > 0
+    float q       = risk > 0 ? f_qty(close, risk) : 0.0
+    if risk > 0 and q > 0
         float lvlTp = tpMode == TP_LVL ? f_levelTarget(close, risk, resLevels, true) : na
         lStop := stp
         lTp   := na(lvlTp) ? close + risk * rrTarget : lvlTp
-        strategy.entry("Long", strategy.long, comment = "TS Long")
+        strategy.entry("Long", strategy.long, qty = q, comment = "TS Long")
         alert("STT Confluence LONG on " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) +
              " | SL " + str.tostring(lStop, format.mintick) + " | TP " + str.tostring(lTp, format.mintick), alert.freq_once_per_bar_close)
 
@@ -334,11 +358,12 @@ if shortSignal and strategy.position_size >= 0
     float stopRef = na(nearRes) ? high : math.max(high, nearRes)
     float stp     = stopRef * (1 + stopBufPct)
     float risk    = stp - close
-    if risk > 0
+    float q       = risk > 0 ? f_qty(close, risk) : 0.0
+    if risk > 0 and q > 0
         float lvlTp = tpMode == TP_LVL ? f_levelTarget(close, risk, supLevels, false) : na
         sStop := stp
         sTp   := na(lvlTp) ? close - risk * rrTarget : lvlTp
-        strategy.entry("Short", strategy.short, comment = "TS Short")
+        strategy.entry("Short", strategy.short, qty = q, comment = "TS Short")
         alert("STT Confluence SHORT on " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) +
              " | SL " + str.tostring(sStop, format.mintick) + " | TP " + str.tostring(sTp, format.mintick), alert.freq_once_per_bar_close)
 
