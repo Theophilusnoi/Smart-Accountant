@@ -1,0 +1,457 @@
+//@version=5
+// =====================================================================================
+//  Smooth Trader Toolkit – Confluence Strategy
+//  ------------------------------------------------------------------------------------
+//  Multi-confluence strategy combining:
+//    • Volume / Market Profile levels (POC, VAH, VAL) – pulled from a higher timeframe
+//    • Major Anchored VWAP (bias filter + structural level)
+//    • Simulated Put Wall / Call Wall (HTF swing low / swing high – Pine cannot read
+//      live options open interest, so recent multi-day extremes are used as proxies)
+//    • PVSRA-style high-volume candles (Teal = bullish climax, Magenta = bearish climax)
+//    • "TS" (Trend Shift) trigger: high-volume candle that bounces off a level and
+//      closes beyond the previous candle's high/low
+//    • "Triple Liq" status box (ARMED when price is near a key liquidity level)
+//
+//  HOW TO TUNE THE MAIN SETTINGS
+//    • "Volume Multiplier" (PVSRA group): a candle is "high volume" when
+//        volume > Volume Multiplier × SMA(volume, Volume Average Length).
+//      Raise it (2.5 – 3.0) for fewer, stronger signals; lower it (1.5) for more signals.
+//    • "Lookback Period" (Volume Profile group): number of bars OF THE PROFILE TIMEFRAME
+//      used to build the profile. Example: Profile TF = 60 and Lookback = 24 gives a
+//      rolling 24-hour profile. Profile TF = 30 and Lookback = 13 ≈ one RTH session.
+//    • "Wall Lookback" (Put/Call Wall group): number of HTF bars (default: 5 daily bars)
+//      used for the simulated Put Wall (lowest low) and Call Wall (highest high).
+//
+//  NON-REPAINTING NOTES
+//    • All request.security() calls use the PREVIOUS completed HTF value ([1]) together
+//      with lookahead_on – the standard non-repainting pattern.
+//    • request.security() is never used with a timeframe lower than the chart.
+//    • Orders are processed on the close of the signal bar (process_orders_on_close).
+//
+//  ALERTS: strategies cannot use alertcondition(); every alert here uses alert().
+//    Create Alert → this strategy → "alert() function calls only".
+// =====================================================================================
+strategy("Smooth Trader Toolkit - Confluence Strategy", shorttitle = "STT Confluence", overlay = true,
+     initial_capital = 10000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10,
+     commission_type = strategy.commission.percent, commission_value = 0.04, slippage = 1,
+     process_orders_on_close = true, max_labels_count = 500, max_bars_back = 1000)
+
+// =====================================================================================
+// INPUTS
+// =====================================================================================
+const string G_VP   = "Volume Profile (POC / VAH / VAL)"
+const string G_VW   = "Major Anchored VWAP"
+const string G_WALL = "Put / Call Walls (simulated)"
+const string G_PV   = "PVSRA High-Volume Candles"
+const string G_ST   = "Structure / Bounce Detection"
+const string G_TL   = "Triple Liq Status"
+const string G_RISK = "Risk Management"
+const string G_COL  = "Colors"
+
+const string SRC_HTF   = "Higher Timeframe"
+const string SRC_CHART = "Chart Timeframe"
+
+vpSource = input.string(SRC_HTF, "Profile Source", options = [SRC_HTF, SRC_CHART], group = G_VP,
+     tooltip = "Higher Timeframe: profile is built from bars of 'Profile Timeframe' via request.security.\nChart Timeframe: profile is built from the chart's own bars.")
+vpTf     = input.timeframe("60", "Profile Timeframe", group = G_VP, tooltip = "Must be >= the chart timeframe (e.g. 30, 60, 240, D).")
+vpLen    = input.int(24, "Lookback Period (bars)", minval = 2, maxval = 500, group = G_VP,
+     tooltip = "Number of bars (of the profile timeframe) included in the volume profile.")
+vpRows   = input.int(40, "Price Rows", minval = 10, maxval = 200, group = G_VP)
+vaPct    = input.float(70.0, "Value Area %", minval = 10, maxval = 99, group = G_VP) / 100.0
+
+const string A_SESSION = "Session (Day)"
+const string A_WEEK    = "Week"
+const string A_MONTH   = "Month"
+const string A_QUARTER = "Quarter"
+const string A_YEAR    = "Year"
+const string A_CUSTOM  = "Custom Date"
+const string A_PIVOT   = "Swing Low Pivot"
+avwapAnchor = input.string(A_WEEK, "Anchor", options = [A_SESSION, A_WEEK, A_MONTH, A_QUARTER, A_YEAR, A_CUSTOM, A_PIVOT], group = G_VW)
+avwapDate   = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Custom Anchor Date", group = G_VW,
+     tooltip = "Used only when Anchor = Custom Date (anchor to a major event).")
+pivotLen    = input.int(10, "Swing Pivot Strength", minval = 2, group = G_VW,
+     tooltip = "Used only when Anchor = Swing Low Pivot. The VWAP re-anchors when a new swing low is confirmed (pivotLen bars after it), which keeps it non-repainting.")
+vwapSrc     = input.source(hlc3, "VWAP Source", group = G_VW)
+
+wallTf  = input.timeframe("D", "Wall Timeframe", group = G_WALL)
+wallLen = input.int(5, "Wall Lookback (HTF bars)", minval = 1, maxval = 50, group = G_WALL,
+     tooltip = "Put Wall = lowest low, Call Wall = highest high of the last N completed HTF bars (3-5 days recommended).")
+
+volLen     = input.int(20, "Volume Average Length", minval = 2, group = G_PV)
+volMult    = input.float(2.0, "Volume Multiplier", minval = 1.0, step = 0.1, group = G_PV,
+     tooltip = "High-volume candle = volume > multiplier x SMA(volume). Higher = fewer, stronger signals.")
+colorBars  = input.bool(true, "Color High-Volume Candles", group = G_PV)
+showDiam   = input.bool(true, "Show Diamond Markers", group = G_PV)
+
+touchTolPct = input.float(0.15, "Touch Tolerance %", minval = 0.0, step = 0.05, group = G_ST,
+     tooltip = "How close (in %) the wick must come to a level to count as a test of it.") / 100.0
+touchBars   = input.int(3, "Bounce Window (bars)", minval = 1, maxval = 20, group = G_ST,
+     tooltip = "The level must have been tested within this many bars (including the signal bar).")
+useWalls    = input.bool(true, "Use Put / Call Walls", group = G_ST)
+useVA       = input.bool(true, "Use VAH / VAL", group = G_ST)
+usePOC      = input.bool(true, "Use POC", group = G_ST)
+useVwapLvl  = input.bool(true, "Use Anchored VWAP as level", group = G_ST)
+
+armPct      = input.float(0.5, "Arm Distance %", minval = 0.05, step = 0.05, group = G_TL,
+     tooltip = "Triple Liq is ARMED when price is within this % of the Put Wall, Call Wall or Anchored VWAP.") / 100.0
+showTable   = input.bool(true, "Show Triple Liq Box", group = G_TL)
+showBg      = input.bool(true, "Show Background Highlight", group = G_TL)
+
+const string D_BOTH  = "Both"
+const string D_LONG  = "Long Only"
+const string D_SHORT = "Short Only"
+const string TP_LVL  = "Next Level (RR fallback)"
+const string TP_RR   = "Fixed RR"
+tradeDir    = input.string(D_BOTH, "Trade Direction", options = [D_BOTH, D_LONG, D_SHORT], group = G_RISK)
+requireBias = input.bool(true, "Require Anchored VWAP Bias", group = G_RISK)
+tpMode      = input.string(TP_LVL, "Take Profit Mode", options = [TP_LVL, TP_RR], group = G_RISK)
+rrTarget    = input.float(2.0, "Risk:Reward Target", minval = 0.5, step = 0.25, group = G_RISK)
+minRR       = input.float(1.0, "Min RR for Level Target", minval = 0.1, step = 0.25, group = G_RISK,
+     tooltip = "A structural target is only used if it offers at least this RR; otherwise the fixed RR target is used.")
+stopBufPct  = input.float(0.05, "Stop Buffer %", minval = 0.0, step = 0.01, group = G_RISK) / 100.0
+showRisk    = input.bool(true, "Plot Active Stop / Target", group = G_RISK)
+
+cVwap   = input.color(color.new(#2962FF, 0), "Anchored VWAP", group = G_COL)
+cPoc    = input.color(color.new(color.white, 0), "POC", group = G_COL)
+cVA     = input.color(color.new(#FFD600, 0), "VAH / VAL", group = G_COL)
+cPut    = input.color(color.new(#00E676, 0), "Put Wall", group = G_COL)
+cCall   = input.color(color.new(#FF5252, 0), "Call Wall", group = G_COL)
+cTeal   = input.color(color.new(#00E5FF, 0), "Bullish High-Volume (Teal)", group = G_COL)
+cMag    = input.color(color.new(#E040FB, 0), "Bearish High-Volume (Magenta)", group = G_COL)
+cDiaUp  = input.color(color.new(#00C853, 0), "Bullish Diamond", group = G_COL)
+cDiaDn  = input.color(color.new(#AA00FF, 0), "Bearish Diamond", group = G_COL)
+
+// =====================================================================================
+// SANITY CHECKS
+// =====================================================================================
+if barstate.isfirst
+    if vpSource == SRC_HTF and timeframe.in_seconds(vpTf) < timeframe.in_seconds()
+        runtime.error("Profile Timeframe must be higher than or equal to the chart timeframe.")
+    if timeframe.in_seconds(wallTf) < timeframe.in_seconds()
+        runtime.error("Wall Timeframe must be higher than or equal to the chart timeframe.")
+
+cumVol = ta.cum(nz(volume))
+if barstate.islast and cumVol == 0
+    runtime.error("This symbol has no volume data – volume profile, VWAP and PVSRA need volume.")
+
+// =====================================================================================
+// VOLUME PROFILE (approximate)
+//   Each bar's volume is spread evenly across the price rows its high-low range covers.
+//   POC = row with the most volume. Value Area expands from the POC towards the larger
+//   neighbouring row until Value Area % of total volume is contained.
+// =====================================================================================
+f_volumeProfile(int len, int rows, float vaP) =>
+    float hi  = ta.highest(high, len)
+    float lo  = ta.lowest(low, len)
+    float poc = na
+    float vah = na
+    float val = na
+    if not na(hi) and not na(lo) and hi > lo
+        float step = (hi - lo) / rows
+        bins = array.new_float(rows, 0.0)
+        for i = 0 to len - 1
+            float h = high[i]
+            float l = low[i]
+            float v = nz(volume[i])
+            if not na(h) and not na(l) and v > 0
+                int b0 = math.max(0, math.min(rows - 1, int(math.floor((l - lo) / step))))
+                int b1 = math.max(0, math.min(rows - 1, int(math.floor((h - lo) / step))))
+                float share = v / (b1 - b0 + 1)
+                for b = b0 to b1
+                    array.set(bins, b, array.get(bins, b) + share)
+        float total = array.sum(bins)
+        if total > 0
+            int pocIdx = array.indexof(bins, array.max(bins))
+            float target = total * vaP
+            float acc = array.get(bins, pocIdx)
+            int up = pocIdx
+            int dn = pocIdx
+            while acc < target and (up < rows - 1 or dn > 0)
+                float vUp = up < rows - 1 ? array.get(bins, up + 1) : -1.0
+                float vDn = dn > 0 ? array.get(bins, dn - 1) : -1.0
+                if vUp >= vDn
+                    up += 1
+                    acc += vUp
+                else
+                    dn -= 1
+                    acc += vDn
+            poc := lo + step * (pocIdx + 0.5)
+            vah := lo + step * (up + 1)
+            val := lo + step * dn
+    [poc, vah, val]
+
+// Previous completed bar's profile → non-repainting when used with lookahead_on.
+f_volumeProfilePrev(int len, int rows, float vaP) =>
+    [p, h, l] = f_volumeProfile(len, rows, vaP)
+    [p[1], h[1], l[1]]
+
+[htfPoc, htfVah, htfVal] = request.security(syminfo.tickerid, vpTf, f_volumeProfilePrev(vpLen, vpRows, vaPct), lookahead = barmerge.lookahead_on)
+[chPoc,  chVah,  chVal]  = f_volumeProfilePrev(vpLen, vpRows, vaPct)
+
+float vPoc = vpSource == SRC_HTF ? htfPoc : chPoc
+float vVah = vpSource == SRC_HTF ? htfVah : chVah
+float vVal = vpSource == SRC_HTF ? htfVal : chVal
+
+// =====================================================================================
+// MAJOR ANCHORED VWAP
+// =====================================================================================
+bool chgD  = timeframe.change("D")
+bool chgW  = timeframe.change("W")
+bool chgM  = timeframe.change("M")
+bool chg3M = timeframe.change("3M")
+bool chgY  = timeframe.change("12M")
+bool customHit = time >= avwapDate and nz(time[1], 0) < avwapDate
+float swingLow = ta.pivotlow(low, pivotLen, pivotLen)
+
+bool anchor = switch avwapAnchor
+    A_SESSION => chgD
+    A_WEEK    => chgW
+    A_MONTH   => chgM
+    A_QUARTER => chg3M
+    A_YEAR    => chgY
+    A_CUSTOM  => customHit
+    A_PIVOT   => not na(swingLow)
+    => false
+
+var bool anchoredOnce = false
+if anchor
+    anchoredOnce := true
+
+float avwapRaw = ta.vwap(vwapSrc, anchor)
+float avwap    = anchoredOnce ? avwapRaw : na
+
+// =====================================================================================
+// SIMULATED PUT / CALL WALLS (HTF swing extremes, previous completed bars only)
+// =====================================================================================
+float putWall  = request.security(syminfo.tickerid, wallTf, ta.lowest(low, wallLen)[1],  lookahead = barmerge.lookahead_on)
+float callWall = request.security(syminfo.tickerid, wallTf, ta.highest(high, wallLen)[1], lookahead = barmerge.lookahead_on)
+
+// =====================================================================================
+// PVSRA-STYLE HIGH-VOLUME CANDLES
+// =====================================================================================
+float volAvg = ta.sma(volume, volLen)
+bool  hv     = not na(volAvg) and not na(volume) and volume > volAvg * volMult
+bool  hvBull = hv and close > open
+bool  hvBear = hv and close < open
+
+barcolor(colorBars ? (hvBull ? cTeal : hvBear ? cMag : na) : na, title = "PVSRA Candle Color")
+
+// =====================================================================================
+// STRUCTURE – BOUNCE / REJECTION DETECTION
+//   Support bounce : lowest low of the last N bars tagged the level (within tolerance)
+//                    AND the current bar closes above it.
+//   Resistance rej.: highest high of the last N bars tagged the level AND close is below.
+// =====================================================================================
+f_bounce(float lvl, bool enabled) =>
+    float ll = ta.lowest(low, touchBars)
+    enabled and not na(lvl) and ll <= lvl * (1 + touchTolPct) and close > lvl
+
+f_reject(float lvl, bool enabled) =>
+    float hh = ta.highest(high, touchBars)
+    enabled and not na(lvl) and hh >= lvl * (1 - touchTolPct) and close < lvl
+
+// Evaluated unconditionally every bar (Pine's 'or' is lazy and would break ta.* history).
+bool bPut  = f_bounce(putWall, useWalls)
+bool bVal  = f_bounce(vVal, useVA)
+bool bPoc  = f_bounce(vPoc, usePOC)
+bool bVwap = f_bounce(avwap, useVwapLvl)
+bool rCall = f_reject(callWall, useWalls)
+bool rVah  = f_reject(vVah, useVA)
+bool rPoc  = f_reject(vPoc, usePOC)
+bool rVwap = f_reject(avwap, useVwapLvl)
+
+bool supportBounce   = bPut or bVal or bPoc or bVwap
+bool resistRejection = rCall or rVah or rPoc or rVwap
+
+// =====================================================================================
+// SIGNALS
+// =====================================================================================
+bool biasLong  = not na(avwap) and close > avwap
+bool biasShort = not na(avwap) and close < avwap
+bool allowLong  = tradeDir != D_SHORT
+bool allowShort = tradeDir != D_LONG
+
+// "TS" Trend Shift trigger
+bool tsLong  = hvBull and close > high[1] and supportBounce
+bool tsShort = hvBear and close < low[1]  and resistRejection
+
+bool longSignal  = tsLong  and allowLong  and (not requireBias or biasLong)
+bool shortSignal = tsShort and allowShort and (not requireBias or biasShort)
+
+// =====================================================================================
+// LEVEL HELPERS FOR STOPS / TARGETS
+// =====================================================================================
+f_nearestBelow(float price, array<float> lvls) =>
+    float best = na
+    for x in lvls
+        if not na(x) and x < price
+            best := na(best) ? x : math.max(best, x)
+    best
+
+f_nearestAbove(float price, array<float> lvls) =>
+    float best = na
+    for x in lvls
+        if not na(x) and x > price
+            best := na(best) ? x : math.min(best, x)
+    best
+
+// Closest structural level in trade direction that still offers >= minRR; else na.
+f_levelTarget(float entry, float risk, array<float> lvls, bool isLong) =>
+    float best = na
+    for x in lvls
+        if not na(x)
+            float reward = isLong ? x - entry : entry - x
+            if reward >= risk * minRR
+                best := na(best) ? x : (isLong ? math.min(best, x) : math.max(best, x))
+    best
+
+supLevels = array.from(useWalls ? putWall : na, useVA ? vVal : na, usePOC ? vPoc : na, useVwapLvl ? avwap : na)
+resLevels = array.from(useWalls ? callWall : na, useVA ? vVah : na, usePOC ? vPoc : na, useVwapLvl ? avwap : na)
+
+// =====================================================================================
+// ORDERS
+// =====================================================================================
+var float lStop = na
+var float lTp   = na
+var float sStop = na
+var float sTp   = na
+
+if longSignal and strategy.position_size <= 0
+    float nearSup = f_nearestBelow(close, supLevels)
+    float stopRef = na(nearSup) ? low : math.min(low, nearSup)
+    float stp     = stopRef * (1 - stopBufPct)
+    float risk    = close - stp
+    if risk > 0
+        float lvlTp = tpMode == TP_LVL ? f_levelTarget(close, risk, resLevels, true) : na
+        lStop := stp
+        lTp   := na(lvlTp) ? close + risk * rrTarget : lvlTp
+        strategy.entry("Long", strategy.long, comment = "TS Long")
+        alert("STT Confluence LONG on " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) +
+             " | SL " + str.tostring(lStop, format.mintick) + " | TP " + str.tostring(lTp, format.mintick), alert.freq_once_per_bar_close)
+
+if shortSignal and strategy.position_size >= 0
+    float nearRes = f_nearestAbove(close, resLevels)
+    float stopRef = na(nearRes) ? high : math.max(high, nearRes)
+    float stp     = stopRef * (1 + stopBufPct)
+    float risk    = stp - close
+    if risk > 0
+        float lvlTp = tpMode == TP_LVL ? f_levelTarget(close, risk, supLevels, false) : na
+        sStop := stp
+        sTp   := na(lvlTp) ? close - risk * rrTarget : lvlTp
+        strategy.entry("Short", strategy.short, comment = "TS Short")
+        alert("STT Confluence SHORT on " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) +
+             " | SL " + str.tostring(sStop, format.mintick) + " | TP " + str.tostring(sTp, format.mintick), alert.freq_once_per_bar_close)
+
+// Keep protective orders attached while the position is open.
+if not na(lStop) and not na(lTp)
+    strategy.exit("Long Exit",  from_entry = "Long",  stop = lStop, limit = lTp, comment_loss = "SL", comment_profit = "TP")
+if not na(sStop) and not na(sTp)
+    strategy.exit("Short Exit", from_entry = "Short", stop = sStop, limit = sTp, comment_loss = "SL", comment_profit = "TP")
+
+// =====================================================================================
+// TRIPLE LIQ STATUS
+// =====================================================================================
+f_near(float lvl) =>
+    not na(lvl) and math.abs(close - lvl) / close <= armPct
+
+bool nearPut  = f_near(putWall)
+bool nearCall = f_near(callWall)
+bool nearVwap = f_near(avwap)
+bool armed    = nearPut or nearCall or nearVwap
+
+string tlStatus = longSignal ? "FIRED LONG" : shortSignal ? "FIRED SHORT" : armed ? "ARMED - waiting" : "IDLE"
+
+// =====================================================================================
+// PLOTS – STRUCTURAL LEVELS
+// =====================================================================================
+plot(avwap,    "Major Anchored VWAP", cVwap, 3, plot.style_linebr)
+plot(vPoc,     "POC",                 cPoc,  2, plot.style_linebr)
+plot(vVah,     "VAH",                 cVA,   1, plot.style_linebr)
+plot(vVal,     "VAL",                 cVA,   1, plot.style_linebr)
+plot(putWall,  "Put Wall",            cPut,  2, plot.style_linebr)
+plot(callWall, "Call Wall",           cCall, 2, plot.style_linebr)
+
+// Active stop / target
+bool inLong  = strategy.position_size > 0
+bool inShort = strategy.position_size < 0
+plot(showRisk and inLong  ? lStop : showRisk and inShort ? sStop : na, "Active Stop",   color.new(color.red, 0),  1, plot.style_linebr)
+plot(showRisk and inLong  ? lTp   : showRisk and inShort ? sTp   : na, "Active Target", color.new(color.lime, 0), 1, plot.style_linebr)
+
+// =====================================================================================
+// PLOTS – MARKERS
+// =====================================================================================
+float atr = ta.atr(14)
+plotshape(showDiam and hvBull ? low  - atr * 0.25 : na, "Bullish HV Diamond", shape.diamond, location.absolute, cDiaUp, size = size.small)
+plotshape(showDiam and hvBear ? high + atr * 0.25 : na, "Bearish HV Diamond", shape.diamond, location.absolute, cDiaDn, size = size.small)
+
+plotshape(tsLong  ? low  - atr * 0.9 : na, "TS Long",  shape.arrowup,   location.absolute, color.new(#00E676, 0), text = "TS", textcolor = color.new(#00E676, 0), size = size.large)
+plotshape(tsShort ? high + atr * 0.9 : na, "TS Short", shape.arrowdown, location.absolute, color.new(#FF5252, 0), text = "TS", textcolor = color.new(#FF5252, 0), size = size.large)
+
+// Background highlight: armed + long signal / long position (green), armed + short (red)
+color bg = na
+if showBg and armed
+    bg := (longSignal or inLong) ? color.new(color.green, 88) : (shortSignal or inShort) ? color.new(color.red, 88) : na
+bgcolor(bg, title = "Triple Liq Background")
+
+// =====================================================================================
+// LEVEL LABELS (right edge)
+// =====================================================================================
+var label lbAvwap = label.new(na, na, "", style = label.style_label_left, size = size.small)
+var label lbPoc   = label.new(na, na, "", style = label.style_label_left, size = size.small)
+var label lbVah   = label.new(na, na, "", style = label.style_label_left, size = size.small)
+var label lbVal   = label.new(na, na, "", style = label.style_label_left, size = size.small)
+var label lbPut   = label.new(na, na, "", style = label.style_label_left, size = size.small)
+var label lbCall  = label.new(na, na, "", style = label.style_label_left, size = size.small)
+
+f_setLabel(label lb, float y, string txt, color col) =>
+    if na(y)
+        label.set_xy(lb, na, na)
+        label.set_text(lb, "")
+    else
+        label.set_xy(lb, bar_index + 2, y)
+        label.set_text(lb, txt + "  " + str.tostring(y, format.mintick))
+        label.set_color(lb, color.new(col, 70))
+        label.set_textcolor(lb, color.white)
+
+if barstate.islast
+    f_setLabel(lbAvwap, avwap,    "Major AVWAP", cVwap)
+    f_setLabel(lbPoc,   vPoc,     "POC",         cPoc)
+    f_setLabel(lbVah,   vVah,     "VAH",         cVA)
+    f_setLabel(lbVal,   vVal,     "VAL",         cVA)
+    f_setLabel(lbPut,   putWall,  "Put Wall",    cPut)
+    f_setLabel(lbCall,  callWall, "Call Wall",   cCall)
+
+// =====================================================================================
+// TRIPLE LIQ BOX (top right)
+// =====================================================================================
+var table tl = table.new(position.top_right, 2, 5, bgcolor = color.new(color.black, 20), border_color = color.new(color.gray, 50), border_width = 1)
+
+if barstate.isfirst
+    table.merge_cells(tl, 0, 0, 1, 0)
+
+if showTable and barstate.islast
+    color stCol = longSignal ? color.new(#00E676, 0) : shortSignal ? color.new(#FF5252, 0) : armed ? color.new(#FFD600, 0) : color.new(color.gray, 0)
+    table.cell(tl, 0, 0, "Triple Liq - " + tlStatus, text_color = stCol, text_size = size.normal)
+    table.cell(tl, 0, 1, "Bias",      text_color = color.white, text_size = size.small)
+    table.cell(tl, 1, 1, biasLong ? "Bullish (above AVWAP)" : biasShort ? "Bearish (below AVWAP)" : "n/a",
+         text_color = biasLong ? color.lime : biasShort ? color.red : color.gray, text_size = size.small)
+    table.cell(tl, 0, 2, "Put Wall",  text_color = color.white, text_size = size.small)
+    table.cell(tl, 1, 2, nearPut ? "NEAR" : "-",  text_color = nearPut ? color.yellow : color.gray, text_size = size.small)
+    table.cell(tl, 0, 3, "AVWAP",     text_color = color.white, text_size = size.small)
+    table.cell(tl, 1, 3, nearVwap ? "NEAR" : "-", text_color = nearVwap ? color.yellow : color.gray, text_size = size.small)
+    table.cell(tl, 0, 4, "Call Wall", text_color = color.white, text_size = size.small)
+    table.cell(tl, 1, 4, nearCall ? "NEAR" : "-", text_color = nearCall ? color.yellow : color.gray, text_size = size.small)
+
+// =====================================================================================
+// ALERTS
+//   TradingView only delivers alertcondition() events from INDICATORS, so this strategy
+//   raises every event through alert(). To use them: Create Alert → Condition = this
+//   strategy → "alert() function calls only". Entry alerts (with SL / TP) are sent from
+//   the order block above; TS triggers and Triple Liq arming are sent here.
+// =====================================================================================
+if tsLong
+    alert("STT: TS (Trend Shift) LONG trigger on " + syminfo.ticker + " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if tsShort
+    alert("STT: TS (Trend Shift) SHORT trigger on " + syminfo.ticker + " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if armed and not armed[1]
+    alert("STT: Triple Liq ARMED on " + syminfo.ticker + " - price near a key level", alert.freq_once_per_bar_close)
